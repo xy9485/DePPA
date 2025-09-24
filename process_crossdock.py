@@ -22,6 +22,14 @@ from analysis.metrics import rdmol_to_smiles
 import constants
 from constants import covalent_radii, dataset_params
 
+import os
+if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
+    import debugpy
+
+    # Use any open port, e.g., 5678
+    debugpy.listen(("0.0.0.0", 5678))
+    print("🔍 Waiting for debugger attach on port 5678...")
+    debugpy.wait_for_client()
 
 def process_ligand_and_pocket(pdbfile, sdffile,
                               atom_dict, dist_cutoff, ca_only):

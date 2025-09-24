@@ -19,6 +19,15 @@ from analysis.molecule_builder import build_molecule, process_molecule
 from analysis.metrics import MoleculeProperties
 
 
+import os
+if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
+    import debugpy
+
+    # Use any open port, e.g., 5678
+    debugpy.listen(("0.0.0.0", 5675))
+    print("🔍 Waiting for debugger attach on port 5675...")
+    debugpy.wait_for_client()
+
 def prepare_from_sdf_files(sdf_files, atom_encoder):
 
     ligand_coords = []
@@ -132,6 +141,7 @@ def diversify_ligands(model, pocket, mols, timesteps,
     atom_type = out_lig[:, model.x_dims:].argmax(1).detach().cpu()
 
     molecules = []
+    lig_mask = lig_mask.cpu()
     for mol_pc in zip(utils.batch_to_list(x, lig_mask),
                       utils.batch_to_list(atom_type, lig_mask)):
 
@@ -199,10 +209,17 @@ if __name__ == "__main__":
     buffer = pd.DataFrame(columns=['generation', 'score', 'fate' 'mol', 'smiles'])
 
     # Population initialization
-    buffer = buffer.append({'generation': 0,
-                            'score': objective_function(ref_mol),
-                            'fate': 'initial', 'mol': ref_mol,
-                            'smiles': Chem.MolToSmiles(ref_mol)}, ignore_index=True)
+    # buffer = buffer.append({'generation': 0,
+    #                         'score': objective_function(ref_mol),
+    #                         'fate': 'initial', 'mol': ref_mol,
+    #                         'smiles': Chem.MolToSmiles(ref_mol)}, ignore_index=True)
+    buffer = pd.concat([buffer, pd.DataFrame([{
+        'generation': 0,
+        'score': objective_function(ref_mol),
+        'fate': 'initial',
+        'mol': ref_mol,
+        'smiles': Chem.MolToSmiles(ref_mol)
+    }])], ignore_index=True)
 
     for generation_idx in range(evolution_steps):
 
@@ -235,11 +252,19 @@ if __name__ == "__main__":
         
         # Evaluate and save molecules
         for mol in molecules:
-            buffer = buffer.append({'generation': generation_idx + 1,
-            'score': objective_function(mol),
-            'fate': 'purged',
-            'mol': mol,
-            'smiles': Chem.MolToSmiles(mol)}, ignore_index=True)
+            # buffer = buffer.append({'generation': generation_idx + 1,
+            # 'score': objective_function(mol),
+            # 'fate': 'purged',
+            # 'mol': mol,
+            # 'smiles': Chem.MolToSmiles(mol)}, ignore_index=True)
+
+            buffer = pd.concat([buffer, pd.DataFrame([{
+                'generation': generation_idx + 1,
+                'score': objective_function(mol),
+                'fate': 'purged',
+                'mol': mol,
+                'smiles': Chem.MolToSmiles(mol)
+            }])], ignore_index=True)
 
 
     # Make SDF files

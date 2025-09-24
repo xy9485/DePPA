@@ -1,0 +1,6 @@
+datasets
+*.pyc
+__pycache__
+*.pkl
+slurm_files
+wandb

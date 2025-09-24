@@ -232,3 +232,21 @@ class AppendVirtualNodes:
         data['num_virtual_atoms'] = n_virt
 
         return data
+
+
+def check_molecule_connectivity(mol):
+    """
+    Check molecule connectivity before sanitization.
+    """
+    # Check for isolated hydrogen atoms specifically
+    for atom in mol.GetAtoms():
+        if atom.GetSymbol() == 'H' and atom.GetDegree() == 0:
+            print("Found isolated hydrogen atom")
+            return False
+            
+        # Check for any isolated atoms
+        if atom.GetDegree() == 0:
+            print(f"Found isolated {atom.GetSymbol()} atom")
+            return False
+    
+    return True

@@ -10,6 +10,15 @@ import numpy as np
 
 from lightning_modules import LigandPocketDDPM
 
+import os
+if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
+    import debugpy
+
+    # Use any open port, e.g., 5678
+    debugpy.listen(("0.0.0.0", 5678))
+    print("🔍 Waiting for debugger attach on port 5678...")
+    debugpy.wait_for_client()
+
 
 def merge_args_and_yaml(args, config_dict):
     arg_dict = args.__dict__
@@ -96,12 +105,12 @@ if __name__ == "__main__":
         name=args.run_name,
         id=args.run_name,
         resume='must' if args.resume is not None else False,
-        entity=args.wandb_params.entity,
+        # entity=args.wandb_params.entity,
         mode=args.wandb_params.mode,
     )
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        dirpath=Path(out_dir, 'checkpoints'),
+        dirpath=Path(out_dir, 'my_checkpoints'),
         filename="best-model-epoch={epoch:02d}",
         monitor="loss/val",
         save_top_k=1,
@@ -115,8 +124,9 @@ if __name__ == "__main__":
         callbacks=[checkpoint_callback],
         enable_progress_bar=args.enable_progress_bar,
         num_sanity_val_steps=args.num_sanity_val_steps,
-        accelerator='gpu', devices=args.gpus,
-        strategy=('ddp' if args.gpus > 1 else None)
+        accelerator='gpu', devices=args.gpus, 
+        # num_nodes=1,
+        strategy=('ddp' if args.gpus > 1 else 'auto')
     )
 
     trainer.fit(model=pl_module, ckpt_path=ckpt_path)

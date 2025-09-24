@@ -27,6 +27,8 @@ from analysis.metrics import BasicMolecularMetrics, CategoricalDistribution, \
 from analysis.molecule_builder import build_molecule, process_molecule
 from analysis.docking import smina_score
 
+from types import SimpleNamespace
+from rdkit import Chem
 
 class LigandPocketDDPM(pl.LightningModule):
     def __init__(
@@ -338,12 +340,12 @@ class LigandPocketDDPM(pl.LightningModule):
         if self.augment_noise > 0:
             raise NotImplementedError
             # Add noise eps ~ N(0, augment_noise) around points.
-            eps = sample_center_gravity_zero_gaussian(x.size(), x.device)
-            x = x + eps * args.augment_noise
+            # eps = sample_center_gravity_zero_gaussian(x.size(), x.device)
+            # x = x + eps * args.augment_noise
 
         if self.augment_rotation:
             raise NotImplementedError
-            x = utils.random_rotation(x).detach()
+            # x = utils.random_rotation(x).detach()
 
         try:
             nll, info = self.forward(data)
@@ -379,7 +381,7 @@ class LigandPocketDDPM(pl.LightningModule):
     def test_step(self, data, *args):
         self._shared_eval(data, 'test', *args)
 
-    def validation_epoch_end(self, validation_step_outputs):
+    def on_validation_epoch_end(self, validation_step_outputs):
 
         # Perform validation on single GPU
         if not self.trainer.is_global_zero:
@@ -871,7 +873,198 @@ class LigandPocketDDPM(pl.LightningModule):
 
         return molecules
 
-    def configure_gradient_clipping(self, optimizer, optimizer_idx,
+    def generate_ligands_rl(self, pdb_file, n_samples, pocket_ids=None,
+                         ref_ligand=None, num_nodes_lig=None, sanitize=False,
+                         largest_frag=False, relax_iter=0, timesteps=None,
+                         n_nodes_bias=0, n_nodes_min=0, ppo_config=None, **kwargs):
+        """
+        Generate ligands given a pocket
+        Args:
+            pdb_file: PDB filename
+            n_samples: number of samples
+            pocket_ids: list of pocket residues in <chain>:<resi> format
+            ref_ligand: alternative way of defining the pocket based on a
+                reference ligand given in <chain>:<resi> format if the ligand is
+                contained in the PDB file, or path to an SDF file that
+                contains the ligand
+            num_nodes_lig: number of ligand nodes for each sample (list of
+                integers), sampled randomly if 'None'
+            sanitize: whether to sanitize molecules or not
+            largest_frag: only return the largest fragment
+            relax_iter: number of force field optimization steps
+            timesteps: number of denoising steps, use training value if None
+            n_nodes_bias: added to the sampled (or provided) number of nodes
+            n_nodes_min: lower bound on the number of sampled nodes
+            kwargs: additional inpainting parameters
+        Returns:
+            list of molecules
+        """
+
+        assert (pocket_ids is None) ^ (ref_ligand is None)
+
+        ppo_config.episode_length = ppo_config.max_time_steps // ppo_config.inference_interval  # length of PPO trajectory
+        optimizer = torch.optim.AdamW(
+        self.ddpm.parameters(),
+        lr=ppo_config.lr, amsgrad=True,
+        weight_decay=1e-4)
+
+        # Load PDB
+        pdb_struct = PDBParser(QUIET=True).get_structure('', pdb_file)[0]
+        if pocket_ids is not None:
+            # define pocket with list of residues
+            residues = [
+                pdb_struct[x.split(':')[0]][(' ', int(x.split(':')[1]), ' ')]
+                for x in pocket_ids]
+
+        else:
+            # define pocket with reference ligand
+            residues = utils.get_pocket_from_ligand(pdb_struct, ref_ligand)
+
+        pocket = self.prepare_pocket(residues, repeats=n_samples)
+
+        # Pocket's center of mass
+        pocket_com_before = scatter_mean(pocket['x'], pocket['mask'], dim=0)
+
+        # Create dummy ligands
+        if num_nodes_lig is None:
+            num_nodes_lig = self.ddpm.size_distribution.sample_conditional(
+                n1=None, n2=pocket['size'])
+
+        # Add bias
+        num_nodes_lig = num_nodes_lig + n_nodes_bias
+
+        # Apply minimum ligand size
+        num_nodes_lig = torch.clamp(num_nodes_lig, min=n_nodes_min)
+
+
+        # Use inpainting
+        if type(self.ddpm) == EnVariationalDiffusion:
+            lig_mask = utils.num_nodes_to_batch_mask(
+                len(num_nodes_lig), num_nodes_lig, self.device)
+
+            ligand = {
+                'x': torch.zeros((len(lig_mask), self.x_dims),
+                                 device=self.device, dtype=FLOAT_TYPE),
+                'one_hot': torch.zeros((len(lig_mask), self.atom_nf),
+                                       device=self.device, dtype=FLOAT_TYPE),
+                'size': num_nodes_lig,
+                'mask': lig_mask
+            }
+
+            # Fix all pocket nodes but sample
+            lig_mask_fixed = torch.zeros(len(lig_mask), device=self.device)
+            pocket_mask_fixed = torch.ones(len(pocket['mask']),
+                                           device=self.device)
+
+            xh_lig, xh_pocket, lig_mask, pocket_mask = self.ddpm.inpaint(
+                ligand, pocket, lig_mask_fixed, pocket_mask_fixed,
+                timesteps=timesteps, **kwargs)
+
+        # Use conditional generation
+        elif type(self.ddpm) == ConditionalDDPM:
+            xh_lig, xh_pocket, lig_mask, pocket_mask, rollout_buffer= \
+                self.ddpm.rl_given_pocket(pocket, num_nodes_lig, return_frames=1, timesteps=None, ppo_config=ppo_config, inference_interval=ppo_config.inference_interval, optimizer=None, pocket_com_before=pocket_com_before)
+
+
+        # Compute rewards and advantages if a reward function is provided
+        episodic_metrics = {}
+        molecules = []
+        atom_types = []
+        aa_types = []
+        receptors = []
+        rewards = []
+        if hasattr(ppo_config, "reward_fn") and callable(ppo_config.reward_fn):
+
+            x = xh_lig[:, :self.x_dims].detach().cpu()
+            atom_type = xh_lig[:, self.x_dims:].argmax(1).detach().cpu()
+            # lig_mask = lig_mask.cpu()
+
+            molecules.extend(list(
+                zip(utils.batch_to_list(x, lig_mask.cpu()),
+                    utils.batch_to_list(atom_type, lig_mask.cpu()))
+            ))
+            for mol_pc in molecules:
+
+                mol = build_molecule(*mol_pc, self.dataset_info, add_coords=True)
+                connectivity = utils.check_molecule_connectivity(mol)
+                if not connectivity:
+                    rewards.append(np.random.uniform(-1, 0.0))
+                    continue
+                mol = process_molecule(mol,
+                                    add_hydrogens=False,
+                                    sanitize=sanitize,
+                                    relax_iter=relax_iter,
+                                    largest_frag=largest_frag)
+                if mol is not None:
+                    rewards.append(ppo_config.reward_fn(mol))
+                else:
+                    rewards.append(np.random.uniform(-0.1, 0.0))
+            # atom_types.extend(atom_type.tolist())
+            # aa_types.extend(xh_pocket[:, self.x_dims:].argmax(1).detach().cpu().tolist())
+
+            # reward_fn should return a tensor of shape (n_samples,)
+            # rewards = ppo_config.reward_fn(
+            #     x_lig=x_lig, h_lig=h_lig, lig_mask=lig_mask, pocket=pocket
+            # )
+            # if not torch.is_tensor(rewards):
+            #     rewards = torch.as_tensor(rewards, device=device, dtype=torch.float32)
+            print("Rewards: ", rewards)
+            rewards = torch.tensor(rewards, device=self.device)
+            advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            episodic_metrics["rewards"] = rewards.mean().item()
+            episodic_metrics["advantages"] = advantages.mean().item()
+        else:
+            # No reward provided; zero-advantages prevents updates
+            advantages = torch.zeros(n_samples, device=self.device)
+
+        # PPO update
+        # Time indices
+        time_indices = np.arange(ppo_config.episode_length)
+
+        # Pre-normalize stored times
+        s_norm_all = rollout_buffer.s_steps / ppo_config.max_time_steps
+        t_norm_all = rollout_buffer.t_steps / ppo_config.max_time_steps
+
+        np.random.shuffle(time_indices)
+        for start in range(0, ppo_config.episode_length, ppo_config.batch_size):
+            end = min(start + ppo_config.batch_size, ppo_config.episode_length)
+            indices = time_indices[start:end]
+
+            for i in indices:
+                # Recompute log_prob under current policy for PPO ratio
+                out_dict = self.ddpm.sample_p_zs_given_zt_rl(
+                    s_norm_all[i], t_norm_all[i],
+                    zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                    ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                    action=rollout_buffer.action_steps[i], mu_via_x0=True
+                )
+                new_log_prob = out_dict['log_prob']        # (n_samples,)
+                old_log_prob = rollout_buffer.log_prob_steps[i]            # (n_samples,)
+
+                logratio = new_log_prob - old_log_prob
+                ratio = torch.exp(logratio)
+
+                # Optionally clip advantages if desired (not provided here)
+                unclipped = -advantages * ratio
+                clipped = -advantages * torch.clamp(
+                    ratio,
+                    1.0 - ppo_config.clip_range,
+                    1.0 + ppo_config.clip_range,
+                )
+                total_loss = 0.0
+                loss_i = torch.mean(torch.maximum(unclipped, clipped))
+                total_loss = total_loss + loss_i
+
+                optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.ddpm.dynamics.parameters(),
+                                                max_norm=1.0)
+                optimizer.step()
+
+        metrics = {"rewards": rewards.mean().item()}
+        return metrics
+
+    def configure_gradient_clipping(self, optimizer,
                                     gradient_clip_val, gradient_clip_algorithm):
 
         if not self.clip_grad:

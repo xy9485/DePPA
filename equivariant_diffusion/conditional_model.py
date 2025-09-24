@@ -8,6 +8,9 @@ from torch_scatter import scatter_add, scatter_mean
 import utils
 from equivariant_diffusion.en_diffusion import EnVariationalDiffusion
 
+from types import SimpleNamespace
+
+
 
 class ConditionalDDPM(EnVariationalDiffusion):
     """
@@ -463,6 +466,119 @@ class ConditionalDDPM(EnVariationalDiffusion):
 
         return zs_lig, xh0_pocket
 
+    def sample_p_zs_given_zt_rl(self, s, t, zt_lig, xh0_pocket, ligand_mask,
+                                pocket_mask, action=None, fix_noise=False,
+                                mu_via_x0=True):
+        """
+        RL-aware version: sample (or evaluate) zs ~ p(z_s | z_t) and return
+        distribution stats + log prob of provided action.
+
+        Args:
+            s, t: tensors (batch, 1) with normalized timesteps s=t-1.
+            zt_lig: (N_lig_total, n_dims + atom_nf)
+            xh0_pocket: (N_pocket_total, n_dims + residue_nf)
+            ligand_mask: (N_lig_total,) batch index per ligand atom
+            pocket_mask: (N_pocket_total,) batch index per pocket residue
+            action: Optional pre-chosen zs_lig sample (same shape as zt_lig).
+            fix_noise: unused (kept for interface parity)
+            mu_via_x0: if True use x0 prediction parameterization for mean.
+
+        Returns:
+            dict with:
+              action: sampled (or provided) zs_lig (before COM projection)
+              mu: mean for each ligand atom
+              sigma: per-batch scalar std (broadcasted by mask)
+              eps_t: network epsilon prediction
+              log_prob: per-sample log prob (normalized per atom)
+              zs_xzeromean: action with x part projected to COM-free together with pocket
+              action_entropy: per-sample entropy (normalized per atom)
+        """
+        # gamma and conditional coefficients
+        gamma_s = self.gamma(s)
+        gamma_t = self.gamma(t)
+
+        sigma2_t_given_s, sigma_t_given_s, alpha_t_given_s = \
+            self.sigma_and_alpha_t_given_s(gamma_t, gamma_s, zt_lig)
+
+        sigma_s = self.sigma(gamma_s, target_tensor=zt_lig)       # (batch,1)
+        sigma_t = self.sigma(gamma_t, target_tensor=zt_lig)       # (batch,1)
+
+        # Network epsilon prediction
+        eps_t_lig, _ = self.dynamics(zt_lig, xh0_pocket, t, ligand_mask, pocket_mask)
+
+        # Optionally compute mu via predicted x0
+        if mu_via_x0:
+            alpha_t = self.alpha(gamma_t, target_tensor=zt_lig)   # (batch,1)
+            alpha_s = self.alpha(gamma_s, target_tensor=zt_lig)   # (batch,1)
+            pred_x0 = (zt_lig - sigma_t[ligand_mask] * eps_t_lig) / alpha_t[ligand_mask]
+            # Clamp only h-part (categorical logits) to [0,1] to avoid runaway
+            pred_x0 = torch.cat(
+                [pred_x0[:, :self.n_dims],
+                 pred_x0[:, self.n_dims:].clamp(0.0, 1.0)],
+                dim=1
+            )
+            # mu formula (broadcast batch scalars to atoms via ligand_mask)
+            sigma_s_l = sigma_s[ligand_mask]
+            sigma_t_l = sigma_t[ligand_mask]
+            alpha_t_given_s_l = alpha_t_given_s[ligand_mask]
+            sigma2_t_given_s_l = sigma2_t_given_s[ligand_mask]
+            alpha_s_l = alpha_s[ligand_mask]
+
+            mu_lig = (alpha_t_given_s_l * (sigma_s_l ** 2) / (sigma_t_l ** 2) * zt_lig +
+                      alpha_s_l * sigma2_t_given_s_l / (sigma_t_l ** 2) * pred_x0)
+        else:
+            alpha_t_given_s_l = alpha_t_given_s[ligand_mask]
+            sigma2_t_given_s_l = sigma2_t_given_s[ligand_mask]
+            sigma_t_l = sigma_t[ligand_mask]
+            mu_lig = (zt_lig / alpha_t_given_s_l -
+                      (sigma2_t_given_s_l / alpha_t_given_s_l / sigma_t_l) * eps_t_lig)
+
+        # Sigma for p(z_s | z_t)
+        sigma = sigma_t_given_s * sigma_s / sigma_t              # (batch,1)
+        sigma_lig = sigma[ligand_mask]                           # (N_atoms,1)
+
+        # Sample action if not provided
+        if action is None:
+            noise = self.sample_gaussian(size=mu_lig.shape, device=mu_lig.device)
+            action = mu_lig + sigma_lig * noise
+
+        # Keep a zero-COM x projection version (ligand + pocket recentered)
+        # Clone to avoid modifying original action when projecting
+        zs_lig = action.clone()
+        zs_lig[:, :self.n_dims], xh0_pocket[:, :self.n_dims]  = self.remove_mean_batch(
+            zs_lig[:, :self.n_dims],
+            xh0_pocket[:, :self.n_dims],
+            ligand_mask, pocket_mask
+        )
+
+        # Log prob of action under Normal(mu, sigma)
+        # Broadcast sigma_lig over feature dimension
+        log_prob_feat = - (action - mu_lig) ** 2 / (2 * (sigma_lig ** 2)) \
+                        - torch.log(sigma_lig) \
+                        - 0.5 * math.log(2 * math.pi)
+        # Sum over feature dims -> per-node
+        log_prob_node = log_prob_feat.sum(dim=1)
+        # Aggregate per batch
+        log_prob_batch = scatter_add(log_prob_node, ligand_mask, dim=0)
+        n_atoms = scatter_add(torch.ones_like(log_prob_node), ligand_mask, dim=0)
+        log_prob = log_prob_batch / n_atoms
+
+        # Entropy (same scalar per feature, sum over features, normalize)
+        entropy_feat = 0.5 + 0.5 * math.log(2 * math.pi) + torch.log(sigma_lig)
+        entropy_node = entropy_feat.sum(dim=1)
+        entropy_batch = scatter_add(entropy_node, ligand_mask, dim=0) / n_atoms
+
+        return {
+            "action": action,
+            "mu": mu_lig,
+            "sigma": sigma_lig,
+            "eps_t": eps_t_lig,
+            "log_prob": log_prob,
+            "zs_lig": zs_lig,
+            "xh0_pocket": xh0_pocket,
+            "action_entrophy": entropy_batch
+        }
+
     def sample_combined_position_feature_noise(self, lig_indices, xh0_pocket,
                                                pocket_indices):
         """
@@ -694,6 +810,134 @@ class ConditionalDDPM(EnVariationalDiffusion):
         x_lig = x_lig - mean[lig_indices]
         x_pocket = x_pocket - mean[pocket_indices]
         return x_lig, x_pocket
+
+    def rl_given_pocket(self, pocket, num_nodes_lig, pocket_com_before=None, return_frames=1, timesteps=None, inference_interval=1, ppo_config=None, optimizer=None):
+        """ 
+        RL rollout and (optional) PPO update for conditional diffusion.
+        - Collects a trajectory with obs, actions, log_probs at a stride defined by
+          ppo_config.inference_interval.
+        - Uses sample_p_zs_given_zt_rl to produce actions and log-probs.
+        - At the end, samples x,h | z0 and (optionally) computes rewards via
+          ppo_config.reward_fn(x_lig, h_lig, lig_mask, pocket) -> (n_samples,)
+        - If `optimizer` is provided, performs PPO updates using the collected
+          trajectory and advantages.
+
+        Returns:
+            episodic_metrics: dict with at least 'rewards' (mean), 'advantages' (mean),
+                              'valid_rate' if reward_fn returns such stats, else omitted.
+        """
+        assert ppo_config is not None, "ppo_config is required"
+        assert hasattr(ppo_config, "inference_interval") and ppo_config.inference_interval > 0
+        timesteps = self.T if timesteps is None else timesteps
+        assert timesteps % ppo_config.inference_interval == 0, \
+            "timesteps must be divisible by inference_interval"
+        assert 0 < return_frames <= timesteps and timesteps % return_frames == 0
+
+        n_samples = len(pocket['size'])
+        device = pocket['x'].device
+
+        # Normalize pocket only (as in sample_given_pocket)
+        _, pocket = self.normalize(pocket=pocket)
+
+        # Prepare pocket features and masks
+        xh0_pocket = torch.cat([pocket['x'], pocket['one_hot']], dim=1)
+        lig_mask = utils.num_nodes_to_batch_mask(n_samples, num_nodes_lig, device)
+
+        # Initialize ligand latent z in pocket center and COM-free
+        mu_lig_x = scatter_mean(pocket['x'], pocket['mask'], dim=0)
+        mu_lig_h = torch.zeros((n_samples, self.atom_nf), device=device)
+        mu_lig = torch.cat((mu_lig_x, mu_lig_h), dim=1)[lig_mask]
+        sigma = torch.ones_like(pocket['size']).unsqueeze(1)
+
+        z_lig, xh_pocket = self.sample_normal_zero_com(
+            mu_lig, xh0_pocket, sigma, lig_mask, pocket['mask']
+        )
+        self.assert_mean_zero_with_mask(z_lig[:, :self.n_dims], lig_mask)
+
+        # For optional visualization frames (unnormalized z for intermediate steps)
+        out_lig = torch.zeros((return_frames,) + z_lig.size(), device=z_lig.device)
+        out_pocket = torch.zeros((return_frames,) + xh_pocket.size(), device=device)
+
+        # Episode buffers (time-major)
+        episode_length = timesteps // ppo_config.inference_interval
+        obs_steps = torch.zeros((episode_length,) + z_lig.size(), device=z_lig.device)
+        action_steps = torch.zeros((episode_length,) + z_lig.size(), device=z_lig.device)
+        log_prob_steps = torch.zeros((episode_length, n_samples), device=z_lig.device)
+        t_steps = torch.zeros((episode_length, n_samples, 1), device=z_lig.device)
+        s_steps = torch.zeros((episode_length, n_samples, 1), device=z_lig.device)
+        done_steps = torch.zeros((episode_length, n_samples), device=z_lig.device)
+        # Store xh_pocket per step (needed to recompute log_probs during PPO update)
+        xh_pocket_steps = torch.zeros((episode_length,) + xh_pocket.size(), device=device)
+
+        next_done = torch.zeros(n_samples, device=z_lig.device)
+
+        # Reverse diffusion with stride = inference_interval
+        frame_stride = timesteps // return_frames
+        for idx, s in enumerate(reversed(range(0, timesteps, ppo_config.inference_interval))):
+            s_array = torch.full((n_samples, 1), fill_value=s, device=z_lig.device)
+            t_array = s_array + ppo_config.inference_interval
+            t_steps[idx] = t_array
+            s_steps[idx] = s_array
+
+            s_norm = s_array / timesteps
+            t_norm = t_array / timesteps
+
+            # Record observation and dones
+            obs_steps[idx] = z_lig
+            xh_pocket_steps[idx] = xh_pocket
+            done_steps[idx] = next_done
+
+            with torch.no_grad():
+                out_dict = self.sample_p_zs_given_zt_rl(
+                    s_norm, t_norm, zt_lig=z_lig, xh0_pocket=xh_pocket,
+                    ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                    mu_via_x0=True
+                )
+            # Step environment (zs_xzeromean is zero-COM version of the action)
+            z_lig = out_dict['zs_lig']
+            xh_pocket = out_dict['xh0_pocket']
+            action_steps[idx] = out_dict['action']
+            log_prob_steps[idx] = out_dict['log_prob']
+
+            # Mark done only at the final step
+            if s == 0:
+                next_done = torch.ones(n_samples, device=z_lig.device)
+
+            # Save frame if requested (unnormalized z for viz)
+            if (s % frame_stride) == 0:
+                frame_idx = s // frame_stride
+                out_lig[frame_idx], out_pocket[frame_idx] = self.unnormalize_z(z_lig, xh_pocket)
+
+            # Keep COM-free in x-part
+            self.assert_mean_zero_with_mask(z_lig[:, :self.n_dims], lig_mask)
+
+        # Final sample p(x, h | z_0)
+        x_lig, h_lig, x_pocket, h_pocket = self.sample_p_xh_given_z0(
+            z_lig, xh_pocket, lig_mask, pocket['mask'], n_samples
+        )
+        self.assert_mean_zero_with_mask(x_lig, lig_mask)
+
+        # Correct CoM drift if no intermediate frames
+        if return_frames == 1:
+            max_cog = scatter_add(x_lig, lig_mask, dim=0).abs().max().item()
+            if max_cog > 5e-2:
+                print(f'Warning CoG drift with error {max_cog:.3f}. Projecting the positions down.')
+                x_lig, x_pocket = self.remove_mean_batch(x_lig, x_pocket, lig_mask, pocket['mask'])
+
+        # Overwrite last frame
+        out_lig[0] = torch.cat([x_lig, h_lig], dim=1)
+        out_pocket[0] = torch.cat([x_pocket, h_pocket], dim=1)
+
+        rollout_buffer = SimpleNamespace(obs_steps=obs_steps, action_steps=action_steps,
+                                        log_prob_steps=log_prob_steps,
+                                        s_steps=s_steps,
+                                        t_steps=t_steps,
+                                        xh_pocket_steps=xh_pocket_steps,
+                                        done_steps=done_steps)
+        
+        return out_lig.squeeze(0), out_pocket.squeeze(0), lig_mask, \
+               pocket['mask'], rollout_buffer
+
 
 
 # ------------------------------------------------------------------------------
