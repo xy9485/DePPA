@@ -14,6 +14,14 @@ try:
 except ModuleNotFoundError as e:
     print(e)
 
+import os
+if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
+    import debugpy
+
+    # Use any open port, e.g., 5678
+    debugpy.listen(("0.0.0.0", 5675))
+    print("🔍 Waiting for debugger attach on port 5675...")
+    debugpy.wait_for_client()
 
 def calculate_smina_score(pdb_file, sdf_file):
     # add '-o <name>_smina.sdf' if you want to see the output
@@ -93,7 +101,7 @@ def calculate_qvina2_score(receptor_file, sdf_file, out_dir, size=20,
 
             # run QuickVina 2
             out = os.popen(
-                f'qvina2.1 --receptor {receptor_pdbqt_file} '
+                f'qvina2 --receptor {receptor_pdbqt_file} '
                 f'--ligand {ligand_pdbqt_file} '
                 f'--center_x {cx:.4f} --center_y {cy:.4f} --center_z {cz:.4f} '
                 f'--size_x {size} --size_y {size} --size_z {size} '

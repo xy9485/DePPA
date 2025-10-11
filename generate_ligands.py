@@ -7,7 +7,7 @@ import wandb
 import torch
 from openbabel import openbabel
 openbabel.obErrorLog.StopLogging()  # suppress OpenBabel messages
-
+import copy
 import utils
 from lightning_modules import LigandPocketDDPM
 
@@ -51,6 +51,12 @@ if __name__ == "__main__":
         args.checkpoint, map_location=device)
     model = model.to(device)
 
+    # model has an attribute ddpm, create a same newwork like ddpm called ddpm_copy and copy the parameters
+    # model.ddpm_pretrained = copy.deepcopy(model.ddpm).to(device)
+    # model.ddpm_pretrained.eval()
+    # for p in model.ddpm_pretrained.parameters():
+    #     p.requires_grad_(False)
+
     if args.num_nodes_lig is not None:
         num_nodes_lig = torch.ones(args.n_samples, dtype=int) * \
                         args.num_nodes_lig
@@ -67,42 +73,43 @@ if __name__ == "__main__":
         batch_size=5,
         sample_n_nodes=True,
         lr=1e-5,
-        reward_fn=model.molecule_properties.calculate_qed,
+        # reward_fn=model.molecule_properties.calculate_qed,
+        reward_fn=model.molecule_properties.calculate_sa
     )
-    wandb.init(
-        project="DiffSBDD-PPO",
-        mode="online",
-        # group="DiffSBDD-PPO-1",
-        # name = run_name,
-        config=vars(ppo_config),
-    )
-    wandb_logger = LoggerWandb()
-    for i in range(1000):
-        metrics = model.generate_ligands_rl(
-            args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
-            num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,
-            relax_iter=(200 if args.relax else 0),
-            resamplings=args.resamplings, jump_length=args.jump_length,
-            timesteps=args.timesteps, ppo_config=ppo_config)      
-
-        metrics["General/iters"] = i
-        metrics["General/timesteps"] = i * model.T
-
-        if wandb_logger is not None:
-            wandb_logger.log_and_dump(metrics)
-
-    # molecules = []
-    # for i in range(args.n_samples // args.batch_size):
-    #     molecules_batch = model.generate_ligands(
+    # wandb.init(
+    #     project="DiffSBDD-PPO",
+    #     mode="online",
+    #     group="DiffSBDD-PPO-SA",
+    #     # name = run_name,
+    #     config=vars(ppo_config),
+    # )
+    # wandb_logger = LoggerWandb()
+    # for i in range(10):
+    #     metrics, molecules = model.generate_ligands_rl(
     #         args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
     #         num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,
     #         relax_iter=(200 if args.relax else 0),
     #         resamplings=args.resamplings, jump_length=args.jump_length,
-    #         timesteps=args.timesteps)
-    #     molecules.extend(molecules_batch)
+    #         timesteps=args.timesteps, ppo_config=ppo_config)      
+
+    #     metrics["General/iters"] = i
+    #     metrics["General/timesteps"] = i * model.T
+
+    #     if wandb_logger is not None:
+    #         wandb_logger.log_and_dump(metrics)
+
+    molecules = []
+    for i in range(args.n_samples // args.batch_size):
+        molecules_batch = model.generate_ligands(
+            args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
+            num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,
+            relax_iter=(200 if args.relax else 0),
+            resamplings=args.resamplings, jump_length=args.jump_length,
+            timesteps=args.timesteps)
+        molecules.extend(molecules_batch)
 
         # this require joint model instead of cond model
         # model.sample_and_analyze(n_samples=args.n_samples, dataset=None, batch_size=args.batch_size)
 
     # Make SDF files
-    # utils.write_sdf_file(args.outfile, molecules)
+    utils.write_sdf_file(args.outfile, molecules)

@@ -979,11 +979,8 @@ class LigandPocketDDPM(pl.LightningModule):
             atom_type = xh_lig[:, self.x_dims:].argmax(1).detach().cpu()
             # lig_mask = lig_mask.cpu()
 
-            molecules.extend(list(
-                zip(utils.batch_to_list(x, lig_mask.cpu()),
-                    utils.batch_to_list(atom_type, lig_mask.cpu()))
-            ))
-            for mol_pc in molecules:
+            for mol_pc in zip(utils.batch_to_list(x, lig_mask.cpu()),
+                    utils.batch_to_list(atom_type, lig_mask.cpu())):
 
                 mol = build_molecule(*mol_pc, self.dataset_info, add_coords=True)
                 connectivity = utils.check_molecule_connectivity(mol)
@@ -995,6 +992,7 @@ class LigandPocketDDPM(pl.LightningModule):
                                     sanitize=sanitize,
                                     relax_iter=relax_iter,
                                     largest_frag=largest_frag)
+                molecules.append(mol)
                 if mol is not None:
                     rewards.append(ppo_config.reward_fn(mol))
                 else:
@@ -1039,7 +1037,7 @@ class LigandPocketDDPM(pl.LightningModule):
                     action=rollout_buffer.action_steps[i], mu_via_x0=True
                 )
                 new_log_prob = out_dict['log_prob']        # (n_samples,)
-                old_log_prob = rollout_buffer.log_prob_steps[i]            # (n_samples,)
+                old_log_prob = rollout_buffer.log_prob_steps[i] 
 
                 logratio = new_log_prob - old_log_prob
                 ratio = torch.exp(logratio)
@@ -1054,6 +1052,21 @@ class LigandPocketDDPM(pl.LightningModule):
                 total_loss = 0.0
                 loss_i = torch.mean(torch.maximum(unclipped, clipped))
                 total_loss = total_loss + loss_i
+                # with torch.no_grad():
+                #     # Also add KL penalty to the pretrained model to prevent
+                #     # catastrophic policy updates
+                #     # Compute log_prob under the pretrained model
+                #     pretrained_out_dict = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
+                #         s_norm_all[i], t_norm_all[i],
+                #         zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                #         ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                #         action=rollout_buffer.action_steps[i], mu_via_x0=True
+                #     ) 
+                #     pretrained_log_prob = pretrained_out_dict['log_prob']
+
+                # # kl divergence loss 
+                # kl_loss = torch.mean(new_log_prob - pretrained_log_prob)
+                # total_loss = total_loss + ppo_config.kl_coef * kl_loss
 
                 optimizer.zero_grad()
                 total_loss.backward()
@@ -1062,7 +1075,7 @@ class LigandPocketDDPM(pl.LightningModule):
                 optimizer.step()
 
         metrics = {"rewards": rewards.mean().item()}
-        return metrics
+        return metrics, molecules
 
     def configure_gradient_clipping(self, optimizer,
                                     gradient_clip_val, gradient_clip_algorithm):
