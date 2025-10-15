@@ -149,6 +149,67 @@ class MoleculeProperties:
         return Crippen.MolLogP(rdmol)
 
     @staticmethod
+    def calculate_docking_score(ligand_mol, receptor_pdbqt_file, center_xyz, use_meeko=False, size=20, exhaustiveness=16):
+        from openbabel import pybel
+        import os
+        assert ligand_mol.GetNumConformers() > 0
+        # mol = Chem.AddHs(ligand_mol)
+        # 3D coordinates + quick minimization (ETKDG + MMFF or UFF)
+        # Chem.AllChem.EmbedMolecule(mol, Chem.AllChem.ETKDGv3())
+        # Chem.AllChem.MMFFOptimizeMolecule(mol)  # or Chem.AllChem.UFFOptimizeMolecule(mol)
+        # center box at ligand's center of mass
+
+        # cx, cy, cz = ligand_mol.GetConformer().GetPositions().mean(0)
+        cx, cy, cz = center_xyz
+        try:
+            if use_meeko:
+                from meeko import MoleculePreparation, PDBQTWriterLegacy
+                
+                # Prepare for docking
+                preparer = MoleculePreparation()
+                prepared_list = preparer.prepare(ligand_mol)
+                assert len(prepared_list) == 1
+                prepared = prepared_list[0]
+                writer = PDBQTWriterLegacy()
+                pdbqt_string, success, error_msg = writer.write_string(prepared)
+                assert success, error_msg
+                # make sure to overwrite the existing file
+                with open("temp_ligand.pdbqt", "w") as f:
+                    f.write(pdbqt_string)
+            else:
+                # RDKit -> molblock (SDF text)
+                molblock = Chem.MolToMolBlock(ligand_mol, kekulize=False)
+                # pybel read and write PDBQT
+
+                obmol = pybel.readstring("sdf", molblock)
+                obmol.write("pdbqt", "temp_ligand.pdbqt", overwrite=True) 
+
+            # run QuickVina 2
+            out = os.popen(
+                f'qvina2 --receptor {receptor_pdbqt_file} '
+                f'--ligand temp_ligand.pdbqt '
+                f'--center_x {cx:.4f} --center_y {cy:.4f} --center_z {cz:.4f} '
+                f'--size_x {size} --size_y {size} --size_z {size} '
+                f'--exhaustiveness {exhaustiveness}'
+            ).read()
+
+            if '-----+------------+----------+----------' not in out:
+                score = np.nan    
+                return score
+
+            out_split = out.splitlines()
+            best_idx = out_split.index('-----+------------+----------+----------') + 1
+            best_line = out_split[best_idx].split()
+            assert best_line[0] == '1'
+            score=float(best_line[1])
+            return score
+
+        except Exception as e:
+            print(f"Error calculating docking score: {e}")
+            score = np.nan
+            return score
+
+    @staticmethod
     def calculate_lipinski(rdmol):
         rule_1 = Descriptors.ExactMolWt(rdmol) < 500
         rule_2 = Lipinski.NumHDonors(rdmol) <= 5

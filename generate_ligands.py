@@ -10,6 +10,11 @@ openbabel.obErrorLog.StopLogging()  # suppress OpenBabel messages
 import copy
 import utils
 from lightning_modules import LigandPocketDDPM
+from Bio.PDB import PDBParser
+
+import numpy as np
+
+from functools import partial
 
 import os
 if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
@@ -24,6 +29,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('checkpoint', type=Path)
     parser.add_argument('--pdbfile', type=str)
+    parser.add_argument('--receptor_file', type=str)
     parser.add_argument('--resi_list', type=str, nargs='+', default=None)
     parser.add_argument('--ref_ligand', type=str, default=None)
     parser.add_argument('--outfile', type=Path)
@@ -63,6 +69,13 @@ if __name__ == "__main__":
     else:
         num_nodes_lig = None
 
+    # Identify mean coord of ligand for centering box for docking score computing, such as qvina2
+    structure = PDBParser(QUIET=True).get_structure("", args.pdbfile)[0]
+    chain_id, resi = args.ref_ligand.split(':')
+    lig_res = utils.get_residue_with_resi(structure[chain_id], int(resi))
+    coords = np.array([a.get_coord() for a in lig_res.get_atoms()])
+    mean_coord_reference_ligand = coords.mean(axis=0)
+
     # RL 
     ppo_config = SimpleNamespace(
         clip_range=0.2,
@@ -74,42 +87,47 @@ if __name__ == "__main__":
         sample_n_nodes=True,
         lr=1e-5,
         # reward_fn=model.molecule_properties.calculate_qed,
-        reward_fn=model.molecule_properties.calculate_sa
+        # reward_fn=model.molecule_properties.calculate_sa,
+        reward_fn=partial(model.molecule_properties.calculate_docking_score,
+                          center_xyz=mean_coord_reference_ligand,
+                          receptor_pdbqt_file=args.receptor_file,
+                          use_meeko=False
+                          ),
     )
-    # wandb.init(
-    #     project="DiffSBDD-PPO",
-    #     mode="online",
-    #     group="DiffSBDD-PPO-SA",
-    #     # name = run_name,
-    #     config=vars(ppo_config),
-    # )
-    # wandb_logger = LoggerWandb()
-    # for i in range(10):
-    #     metrics, molecules = model.generate_ligands_rl(
-    #         args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
-    #         num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,
-    #         relax_iter=(200 if args.relax else 0),
-    #         resamplings=args.resamplings, jump_length=args.jump_length,
-    #         timesteps=args.timesteps, ppo_config=ppo_config)      
-
-    #     metrics["General/iters"] = i
-    #     metrics["General/timesteps"] = i * model.T
-
-    #     if wandb_logger is not None:
-    #         wandb_logger.log_and_dump(metrics)
-
-    molecules = []
-    for i in range(args.n_samples // args.batch_size):
-        molecules_batch = model.generate_ligands(
+    wandb.init(
+        project="DiffSBDD-PPO",
+        mode="online",
+        group="DiffSBDD-PPO-DockingScore",
+        # name = run_name,
+        config=vars(ppo_config),
+    )
+    wandb_logger = LoggerWandb()
+    for i in range(600):
+        metrics, molecules = model.generate_ligands_rl(
             args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
             num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,
             relax_iter=(200 if args.relax else 0),
             resamplings=args.resamplings, jump_length=args.jump_length,
-            timesteps=args.timesteps)
-        molecules.extend(molecules_batch)
+            timesteps=args.timesteps, ppo_config=ppo_config)      
 
-        # this require joint model instead of cond model
-        # model.sample_and_analyze(n_samples=args.n_samples, dataset=None, batch_size=args.batch_size)
+        metrics["General/iters"] = i
+        metrics["General/timesteps"] = i * model.T
 
-    # Make SDF files
-    utils.write_sdf_file(args.outfile, molecules)
+        if wandb_logger is not None:
+            wandb_logger.log_and_dump(metrics)
+
+    # molecules = []
+    # for i in range(args.n_samples // args.batch_size):
+    #     molecules_batch = model.generate_ligands(
+    #         args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
+    #         num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,
+    #         relax_iter=(200 if args.relax else 0),
+    #         resamplings=args.resamplings, jump_length=args.jump_length,
+    #         timesteps=args.timesteps)
+    #     molecules.extend(molecules_batch)
+
+    #     # this require joint model instead of cond model
+    #     # model.sample_and_analyze(n_samples=args.n_samples, dataset=None, batch_size=args.batch_size)
+
+    # # Make SDF files
+    # utils.write_sdf_file(args.outfile, molecules)
