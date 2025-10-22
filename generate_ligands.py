@@ -96,7 +96,7 @@ if __name__ == "__main__":
     )
     wandb.init(
         project="DiffSBDD-PPO",
-        mode="online",
+        mode="offline",
         group="DiffSBDD-PPO-DockingScore",
         # name = run_name,
         config=vars(ppo_config),

@@ -202,12 +202,12 @@ class MoleculeProperties:
             best_line = out_split[best_idx].split()
             assert best_line[0] == '1'
             score=float(best_line[1])
-            return score
+            return -score
 
         except Exception as e:
             print(f"Error calculating docking score: {e}")
             score = np.nan
-            return score
+            return -score
 
     @staticmethod
     def calculate_lipinski(rdmol):
