@@ -96,3 +96,31 @@ References and pointers:
 - Kingma et al., “Variational Diffusion Models” (2021).
 - Internal discussion link provided by user: https://chatgpt.com/c/68f61375-6c94-832e-ad15-319b2b77fadf
 
+## Rotation equivariance of the initial mean and conditional consistency
+
+In `conditional_model.py` (e.g., in `sample_given_pocket`), the initialization
+of the ligand mean position uses the per-graph center of mass of the pocket:
+
+```
+mu_lig_x = scatter_mean(pocket['x'], pocket['mask'], dim=0)
+```
+
+This choice is rotation equivariant. If the pocket coordinates undergo a rigid
+rotation $R$, and the center of mass transforms as:
+
+$$
+\mu(R\,x^P) = R\,\mu(x^P).
+$$
+
+Consequently, the mean used to initialize (or condition) the ligand distribution
+obeys $\mu(R\,x^P)=R\,\mu(x^P)$. This is crucial to ensure the conditional
+distribution respects rotations, i.e.,
+
+$$
+p\big(R\,x_T^L\,\big|\,R\,x^P\big) = p\big(x_T^L\,\big|\,x^P\big),
+$$
+
+so sampling and likelihoods are consistent under global rotations of the
+ligand–pocket system. Practically, this preserves SE(3) coherence of the model
+and avoids orientation-dependent biases introduced by the initialization.
+
