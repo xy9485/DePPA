@@ -190,7 +190,7 @@ class EGNNSPredictor(nn.Module):
             if self.edge_nf is not None else None
         self.edge_nf = 0 if self.edge_nf is None else self.edge_nf
 
-        self._eps = 1e-6
+        self._eps = 1.0
 
         # Pairwise invariant readout: sum_{ij in edges} f(h_i, h_j, rbf(|x_i-x_j|)) -> R^2
         rbf_K = 32

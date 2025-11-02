@@ -138,6 +138,55 @@ class ConditionalDDPM(EnVariationalDiffusion):
 
         return x_lig, h_lig, x_pocket, h_pocket
 
+    def sample_p_xh_given_zt(self, zt_lig, xh0_pocket, lig_mask, pocket_mask,
+                             t, fix_noise=False):
+        """Samples x ~ p(x|z_t) analogous to sample_p_xh_given_z0.
+
+        Args:
+            zt_lig: (N_lig_total, n_dims + atom_nf) latent at time t
+            xh0_pocket: (N_pocket_total, n_dims + residue_nf) pocket features
+            lig_mask: (N_lig_total,) batch index per ligand atom
+            pocket_mask: (N_pocket_total,) batch index per pocket residue
+            t: (batch, 1) normalized timestep in [0, 1]
+            fix_noise: if True, fix sampling noise (not implemented)
+
+        Returns:
+            x_lig, h_lig_onehot, x_pocket, h_pocket (all unnormalized)
+        """
+        # Compute gamma and corresponding sigma_x = sqrt(sigma_t^2 / alpha_t^2)
+        gamma_t = self.gamma(t)
+        sigma_x = self.SNR(-0.5 * gamma_t)
+
+        # Network prediction at time t
+        net_out_lig, _ = self.dynamics(
+            zt_lig, xh0_pocket, t, lig_mask, pocket_mask)
+
+        # Mean for p(x|z_t) via chosen parametrization
+        mu_x_lig = self.compute_x_pred(net_out_lig, zt_lig, gamma_t, lig_mask)
+
+        # Clamp only h-part (categorical logits) to [0,1] to avoid runaway
+        mu_x_lig = torch.cat(
+            [mu_x_lig[:, :self.n_dims],
+                mu_x_lig[:, self.n_dims:].clamp(0.0, 1.0)],
+            dim=1
+        )
+
+        # Sample around the mean with zero-COM projection together with pocket
+        xh_lig, xh0_pocket = self.sample_normal_zero_com(
+            mu_x_lig, xh0_pocket, sigma_x, lig_mask, pocket_mask, fix_noise)
+
+        # Unnormalize; for categorical part use z_t logits (as in z0 case)
+        x_lig, h_lig = self.unnormalize(
+            xh_lig[:, :self.n_dims], zt_lig[:, self.n_dims:])
+        x_pocket, h_pocket = self.unnormalize(
+            xh0_pocket[:, :self.n_dims], xh0_pocket[:, self.n_dims:])
+
+        # Discretize ligand atom types to one-hot
+        h_lig = F.one_hot(torch.argmax(h_lig, dim=1), self.atom_nf)
+        # h_pocket = F.one_hot(torch.argmax(h_pocket, dim=1), self.residue_nf)
+
+        return x_lig, h_lig, x_pocket, h_pocket
+
     def sample_normal(self, *args):
         raise NotImplementedError("Has been replaced by sample_normal_zero_com()")
 
@@ -596,13 +645,13 @@ class ConditionalDDPM(EnVariationalDiffusion):
         if action is None:
             action = dist.sample().unsqueeze(1) # action is in range (0,1)
             # action = (dist.rsample() if use_reparam else dist.sample()).unsqueeze(1)
-        time_interval_scale = action.clamp(1e-6, 1 - 1e-6)
+        action = action.clamp(1e-3, 1 - 1e-3)
         log_prob = dist.log_prob(action.squeeze(1))
 
         # s = t - time_interval_scale * self.inference_interval / self.T
         out_dict = {
             # "s": s,
-            "action2": time_interval_scale,
+            "action2": action,
             "log_prob2": log_prob,
             "ab": ab,
         }
@@ -968,9 +1017,17 @@ class ConditionalDDPM(EnVariationalDiffusion):
             self.assert_mean_zero_with_mask(z_lig[:, :self.n_dims], lig_mask)
 
         # Final sample p(x, h | z_0)
-        x_lig, h_lig, x_pocket, h_pocket = self.sample_p_xh_given_z0(
-            z_lig, xh_pocket, lig_mask, pocket['mask'], n_samples
+        if ppo_config.predict_s:
+            x_lig, h_lig, x_pocket, h_pocket = self.sample_p_xh_given_zt(
+            z_lig, xh_pocket, lig_mask, pocket['mask'], flex_s_norm,
         )
+        else:
+            x_lig, h_lig, x_pocket, h_pocket = self.sample_p_xh_given_z0(
+                z_lig, xh_pocket, lig_mask, pocket['mask'], n_samples
+            )
+        # x_lig, h_lig, x_pocket, h_pocket = self.sample_p_xh_given_z0(
+        #     z_lig, xh_pocket, lig_mask, pocket['mask'], n_samples
+        # )
         self.assert_mean_zero_with_mask(x_lig, lig_mask)
 
         # Correct CoM drift if no intermediate frames

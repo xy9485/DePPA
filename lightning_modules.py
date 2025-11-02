@@ -1036,7 +1036,7 @@ class LigandPocketDDPM(pl.LightningModule):
                 if ppo_config.predict_s:
                     out = self.ddpm.sample_p_stepscale_given_zt_rl(t_steps[i], zt_lig=rollout_buffer.obs_steps[i], xh_pocket=rollout_buffer.xh_pocket_steps[i],
                     ligand_mask=lig_mask, pocket_mask=pocket['mask'], action=action_time_interval_scale_steps[i], mu_via_x0=True)
-                    old_log_prob_time_interval_scale = out['log_prob2']
+                    # old_log_prob_time_interval_scale = out['log_prob2']
                 out_dict = self.ddpm.sample_p_zs_given_zt_rl(
                     s_steps[i], t_steps[i],
                     zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
@@ -1044,7 +1044,7 @@ class LigandPocketDDPM(pl.LightningModule):
                     action=rollout_buffer.action_steps[i], mu_via_x0=True
                 )
                 if ppo_config.predict_s:
-                    new_log_prob = out_dict['log_prob'] + old_log_prob_time_interval_scale  # (n_samples,)
+                    new_log_prob = out_dict['log_prob'] + out['log_prob2']  # (n_samples,)
                     old_log_prob = rollout_buffer.log_prob_steps[i] + rollout_buffer.log_prob_time_interval_scale_steps[i]
                 else:
                     new_log_prob = out_dict['log_prob']        # (n_samples,)
@@ -1082,6 +1082,8 @@ class LigandPocketDDPM(pl.LightningModule):
                 optimizer.zero_grad()
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.ddpm.dynamics.parameters(),
+                                                max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.ddpm.s_predictor.parameters(),
                                                 max_norm=1.0)
                 # check if self.ddpm.s_predictor's egnn and atom_encoder have gradients
                 # for name, param in self.ddpm.dynamics.named_parameters():
