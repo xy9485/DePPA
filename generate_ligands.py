@@ -11,6 +11,7 @@ import copy
 import utils
 from lightning_modules import LigandPocketDDPM
 from Bio.PDB import PDBParser
+from equivariant_diffusion.s_predictor import SPredictor, EGNNSPredictor
 
 import numpy as np
 
@@ -42,6 +43,8 @@ if __name__ == "__main__":
     parser.add_argument('--resamplings', type=int, default=10)
     parser.add_argument('--jump_length', type=int, default=1)
     parser.add_argument('--timesteps', type=int, default=None)
+    parser.add_argument('--s_predictor_mode', type=str, choices=['mlp', 'egnn', None], default='egnn',
+                        help="Which s-predictor to attach after loading the checkpoint: 'mlp' (SPredictor), 'egnn' (EGNNSPredictor), or 'none'.")
     args = parser.parse_args()
 
     pdb_id = Path(args.pdbfile).stem
@@ -57,7 +60,40 @@ if __name__ == "__main__":
         args.checkpoint, map_location=device)
     model = model.to(device)
 
-    # model has an attribute ddpm, create a same newwork like ddpm called ddpm_copy and copy the parameters
+    # Attach invariant s-predictor AFTER loading (keeps checkpoint compatibility)
+    model.s_predictor = None
+    if args.s_predictor_mode == 'mlp':
+        try:
+            sp = SPredictor(atom_nf=model.atom_nf, residue_nf=model.aa_nf, n_dims=model.x_dims).to(device)
+            model.ddpm.s_predictor = sp  # attach without touching the saved state_dict
+        except Exception as e:
+            print(f"[s-predictor] Failed to attach SPredictor: {e}. Continuing without s-predictor.")
+            model.ddpm.s_predictor = None
+    elif args.s_predictor_mode == 'egnn':
+        try:
+            atom_encoder = copy.deepcopy(model.ddpm.dynamics.atom_encoder)
+            residue_encoder = copy.deepcopy(model.ddpm.dynamics.residue_encoder)
+            backbone = copy.deepcopy(model.ddpm.dynamics.egnn)
+            sp = EGNNSPredictor(atom_encoder=atom_encoder, 
+                                residue_encoder=residue_encoder, 
+                                backbone=backbone,
+                                n_dims=model.x_dims, 
+                                h_nf=model.ddpm.dynamics.node_nf,
+                                condition_time=True,
+                                update_pocket_coords=False, 
+                                edge_cutoff_ligand=model.ddpm.dynamics.edge_cutoff_l,
+                                edge_cutoff_pocket=model.ddpm.dynamics.edge_cutoff_p,
+                                edge_cutoff_interaction=model.ddpm.dynamics.edge_cutoff_i,
+                                device=device).to(device)
+            model.ddpm.s_predictor = sp
+        except Exception as e:
+            print(f"[s-predictor] Failed to attach EGNNSPredictor: {e}. Continuing without s-predictor.")
+            model.ddpm.s_predictor = None
+    else:
+        # args.s_predictor == 'none'
+        model.ddpm.s_predictor = None
+
+    # model has an attribute ddpm, create a same network like ddpm called ddpm_copy and copy the parameters
     # model.ddpm_pretrained = copy.deepcopy(model.ddpm).to(device)
     # model.ddpm_pretrained.eval()
     # for p in model.ddpm_pretrained.parameters():
@@ -93,12 +129,14 @@ if __name__ == "__main__":
                           receptor_pdbqt_file=args.receptor_file,
                           use_meeko=False
                           ),
+        predict_s=False if model.ddpm.s_predictor is None else True,
     )
+    run_name = "predict_s"
     wandb.init(
         project="DiffSBDD-PPO",
-        mode="offline",
+        mode="online",
         group="DiffSBDD-PPO-DockingScore",
-        # name = run_name,
+        name=run_name if run_name is not None else None,
         config=vars(ppo_config),
     )
     wandb_logger = LoggerWandb()

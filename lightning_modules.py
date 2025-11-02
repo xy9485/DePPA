@@ -30,6 +30,8 @@ from analysis.docking import smina_score
 from types import SimpleNamespace
 from rdkit import Chem
 
+from equivariant_diffusion.s_predictor import sample_time_interval_scale
+
 class LigandPocketDDPM(pl.LightningModule):
     def __init__(
             self,
@@ -963,7 +965,7 @@ class LigandPocketDDPM(pl.LightningModule):
         # Use conditional generation
         elif type(self.ddpm) == ConditionalDDPM:
             xh_lig, xh_pocket, lig_mask, pocket_mask, rollout_buffer= \
-                self.ddpm.rl_given_pocket(pocket, num_nodes_lig, return_frames=1, timesteps=None, ppo_config=ppo_config, inference_interval=ppo_config.inference_interval, optimizer=None, pocket_com_before=pocket_com_before)
+                self.ddpm.rl_episode_given_pocket(pocket, num_nodes_lig, return_frames=1, timesteps=None, ppo_config=ppo_config, inference_interval=ppo_config.inference_interval, optimizer=None, pocket_com_before=pocket_com_before)
 
 
         # Compute rewards and advantages if a reward function is provided
@@ -1020,8 +1022,9 @@ class LigandPocketDDPM(pl.LightningModule):
         time_indices = np.arange(ppo_config.episode_length)
 
         # Pre-normalize stored times
-        s_norm_all = rollout_buffer.s_steps / ppo_config.max_time_steps
-        t_norm_all = rollout_buffer.t_steps / ppo_config.max_time_steps
+        s_steps = rollout_buffer.s_steps
+        t_steps = rollout_buffer.t_steps
+        action_time_interval_scale_steps = rollout_buffer.action_time_interval_scale_steps
 
         np.random.shuffle(time_indices)
         for start in range(0, ppo_config.episode_length, ppo_config.batch_size):
@@ -1030,14 +1033,22 @@ class LigandPocketDDPM(pl.LightningModule):
 
             for i in indices:
                 # Recompute log_prob under current policy for PPO ratio
+                if ppo_config.predict_s:
+                    out = self.ddpm.sample_p_stepscale_given_zt_rl(t_steps[i], zt_lig=rollout_buffer.obs_steps[i], xh_pocket=rollout_buffer.xh_pocket_steps[i],
+                    ligand_mask=lig_mask, pocket_mask=pocket['mask'], action=action_time_interval_scale_steps[i], mu_via_x0=True)
+                    old_log_prob_time_interval_scale = out['log_prob2']
                 out_dict = self.ddpm.sample_p_zs_given_zt_rl(
-                    s_norm_all[i], t_norm_all[i],
+                    s_steps[i], t_steps[i],
                     zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
                     ligand_mask=lig_mask, pocket_mask=pocket['mask'],
                     action=rollout_buffer.action_steps[i], mu_via_x0=True
                 )
-                new_log_prob = out_dict['log_prob']        # (n_samples,)
-                old_log_prob = rollout_buffer.log_prob_steps[i] 
+                if ppo_config.predict_s:
+                    new_log_prob = out_dict['log_prob'] + old_log_prob_time_interval_scale  # (n_samples,)
+                    old_log_prob = rollout_buffer.log_prob_steps[i] + rollout_buffer.log_prob_time_interval_scale_steps[i]
+                else:
+                    new_log_prob = out_dict['log_prob']        # (n_samples,)
+                    old_log_prob = rollout_buffer.log_prob_steps[i] 
 
                 logratio = new_log_prob - old_log_prob
                 ratio = torch.exp(logratio)
@@ -1072,6 +1083,10 @@ class LigandPocketDDPM(pl.LightningModule):
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.ddpm.dynamics.parameters(),
                                                 max_norm=1.0)
+                # check if self.ddpm.s_predictor's egnn and atom_encoder have gradients
+                # for name, param in self.ddpm.dynamics.named_parameters():
+                #     if param.requires_grad and param.grad is not None:
+                #         print(f'Gradient for {name} with norm {param.grad.norm().item():.4f}')    
                 optimizer.step()
 
         metrics = {"rewards": rewards.mean().item()}

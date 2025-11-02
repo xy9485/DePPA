@@ -7,9 +7,10 @@ from torch_scatter import scatter_add, scatter_mean
 
 import utils
 from equivariant_diffusion.en_diffusion import EnVariationalDiffusion
-
+from equivariant_diffusion.s_predictor import sample_time_interval_scale
 from types import SimpleNamespace
 
+from equivariant_diffusion.s_predictor import SPredictor, EGNNSPredictor
 
 
 class ConditionalDDPM(EnVariationalDiffusion):
@@ -579,6 +580,35 @@ class ConditionalDDPM(EnVariationalDiffusion):
             "action_entrophy": entropy_batch
         }
 
+    def sample_p_stepscale_given_zt_rl(self, t, zt_lig, xh_pocket,
+                                  ligand_mask, pocket_mask, action=None,
+                                  fix_noise=False, mu_via_x0=True):
+        """
+        RL-aware version: sample (or evaluate) zs ~ p(z_s | z_t) with s=t-1.
+
+        See sample_p_zs_given_zt_rl() for details.
+        """
+        from torch.distributions import Beta as TorchBeta
+        ab = self.s_predictor(zt_lig, xh_pocket, t, ligand_mask, pocket_mask)
+        alpha = ab[:, 0].clamp_min(1e-6)
+        beta = ab[:, 1].clamp_min(1e-6)
+        dist = TorchBeta(alpha, beta)
+        if action is None:
+            action = dist.sample().unsqueeze(1) # action is in range (0,1)
+            # action = (dist.rsample() if use_reparam else dist.sample()).unsqueeze(1)
+        time_interval_scale = action.clamp(1e-6, 1 - 1e-6)
+        log_prob = dist.log_prob(action.squeeze(1))
+
+        # s = t - time_interval_scale * self.inference_interval / self.T
+        out_dict = {
+            # "s": s,
+            "action2": time_interval_scale,
+            "log_prob2": log_prob,
+            "ab": ab,
+        }
+        return out_dict
+
+
     def sample_combined_position_feature_noise(self, lig_indices, xh0_pocket,
                                                pocket_indices):
         """
@@ -811,7 +841,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
         x_pocket = x_pocket - mean[pocket_indices]
         return x_lig, x_pocket
 
-    def rl_given_pocket(self, pocket, num_nodes_lig, pocket_com_before=None, return_frames=1, timesteps=None, inference_interval=1, ppo_config=None, optimizer=None):
+    def rl_episode_given_pocket(self, pocket, num_nodes_lig, pocket_com_before=None, return_frames=1, timesteps=None, inference_interval=1, ppo_config=None, optimizer=None):
         """ 
         RL rollout and (optional) PPO update for conditional diffusion.
         - Collects a trajectory with obs, actions, log_probs at a stride defined by
@@ -870,17 +900,20 @@ class ConditionalDDPM(EnVariationalDiffusion):
         xh_pocket_steps = torch.zeros((episode_length,) + xh_pocket.size(), device=device)
 
         next_done = torch.zeros(n_samples, device=z_lig.device)
+        if ppo_config.predict_s:
+            action_time_interval_scale_steps = torch.zeros((episode_length, n_samples, 1), device=z_lig.device)
+            log_prob_time_interval_scale_steps = torch.zeros((episode_length, n_samples), device=z_lig.device)
 
         # Reverse diffusion with stride = inference_interval
         frame_stride = timesteps // return_frames
+        flex_t = torch.full((n_samples, 1), fill_value=timesteps, device=z_lig.device)
+        flex_t_norm = flex_t / timesteps
         for idx, s in enumerate(reversed(range(0, timesteps, ppo_config.inference_interval))):
             s_array = torch.full((n_samples, 1), fill_value=s, device=z_lig.device)
             t_array = s_array + ppo_config.inference_interval
-            t_steps[idx] = t_array
-            s_steps[idx] = s_array
 
-            s_norm = s_array / timesteps
-            t_norm = t_array / timesteps
+            regular_s_norm = s_array / timesteps
+            regular_t_norm = t_array / timesteps
 
             # Record observation and dones
             obs_steps[idx] = z_lig
@@ -888,11 +921,34 @@ class ConditionalDDPM(EnVariationalDiffusion):
             done_steps[idx] = next_done
 
             with torch.no_grad():
-                out_dict = self.sample_p_zs_given_zt_rl(
-                    s_norm, t_norm, zt_lig=z_lig, xh0_pocket=xh_pocket,
+                if ppo_config.predict_s:
+                    out_dict2 = self.sample_p_stepscale_given_zt_rl(flex_t_norm, zt_lig=z_lig, xh_pocket=xh_pocket,
+                    ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                    mu_via_x0=True)
+                    flex_s_norm = regular_t_norm - out_dict2['action2'] * ppo_config.inference_interval / timesteps
+
+                    out_dict = self.sample_p_zs_given_zt_rl(
+                    flex_s_norm, flex_t_norm, zt_lig=z_lig, xh0_pocket=xh_pocket,
                     ligand_mask=lig_mask, pocket_mask=pocket['mask'],
                     mu_via_x0=True
-                )
+                    )
+
+                    s_steps[idx] = flex_s_norm
+                    t_steps[idx] = flex_t_norm
+                    flex_t_norm = flex_s_norm
+                    action_time_interval_scale_steps[idx] = out_dict2['action2']
+                    log_prob_time_interval_scale_steps[idx] = out_dict2['log_prob2']
+                    
+                else: 
+                    out_dict = self.sample_p_zs_given_zt_rl(
+                    regular_s_norm, regular_t_norm, zt_lig=z_lig, xh0_pocket=xh_pocket,
+                    ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                    mu_via_x0=True
+                    )
+
+                    s_steps[idx] = regular_s_norm
+                    t_steps[idx] = regular_t_norm
+
             # Step environment (zs_xzeromean is zero-COM version of the action)
             z_lig = out_dict['zs_lig']
             xh_pocket = out_dict['xh0_pocket']
@@ -933,7 +989,10 @@ class ConditionalDDPM(EnVariationalDiffusion):
                                         s_steps=s_steps,
                                         t_steps=t_steps,
                                         xh_pocket_steps=xh_pocket_steps,
-                                        done_steps=done_steps)
+                                        done_steps=done_steps,
+                                        log_prob_time_interval_scale_steps=log_prob_time_interval_scale_steps if ppo_config.predict_s else None,
+                                        action_time_interval_scale_steps=action_time_interval_scale_steps if ppo_config.predict_s else None
+                                        )
         
         return out_lig.squeeze(0), out_pocket.squeeze(0), lig_mask, \
                pocket['mask'], rollout_buffer
