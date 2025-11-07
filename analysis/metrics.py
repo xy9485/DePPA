@@ -149,9 +149,10 @@ class MoleculeProperties:
         return Crippen.MolLogP(rdmol)
 
     @staticmethod
-    def calculate_docking_score(ligand_mol, receptor_pdbqt_file, center_xyz, use_meeko=False, size=20, exhaustiveness=16):
+    def calculate_docking_score(ligand_mol, receptor_pdbqt_file, center_xyz, use_meeko=False, size=20, exhaustiveness=16, score_only=False):
         from openbabel import pybel
         import os
+        import tempfile
         assert ligand_mol.GetNumConformers() > 0
         # mol = Chem.AddHs(ligand_mol)
         # 3D coordinates + quick minimization (ETKDG + MMFF or UFF)
@@ -162,40 +163,62 @@ class MoleculeProperties:
         # cx, cy, cz = ligand_mol.GetConformer().GetPositions().mean(0)
         cx, cy, cz = center_xyz
         try:
-            if use_meeko:
-                from meeko import MoleculePreparation, PDBQTWriterLegacy
-                
-                # Prepare for docking
-                preparer = MoleculePreparation()
-                prepared_list = preparer.prepare(ligand_mol)
-                assert len(prepared_list) == 1
-                prepared = prepared_list[0]
-                writer = PDBQTWriterLegacy()
-                pdbqt_string, success, error_msg = writer.write_string(prepared)
-                assert success, error_msg
-                # make sure to overwrite the existing file
-                with open("temp_ligand.pdbqt", "w") as f:
-                    f.write(pdbqt_string)
-            else:
-                # RDKit -> molblock (SDF text)
-                molblock = Chem.MolToMolBlock(ligand_mol, kekulize=False)
-                # pybel read and write PDBQT
+            # Use a unique temp directory per call to avoid collisions when
+            # called concurrently from multiple threads/processes.
+            with tempfile.TemporaryDirectory(prefix="qvina_temp_") as tmpdir:
+                lig_pdbqt = os.path.join(tmpdir, "ligand.pdbqt")
 
-                obmol = pybel.readstring("sdf", molblock)
-                obmol.write("pdbqt", "temp_ligand.pdbqt", overwrite=True) 
+                if use_meeko:
+                    from meeko import MoleculePreparation, PDBQTWriterLegacy
 
-            # run QuickVina 2
-            out = os.popen(
-                f'qvina2 --receptor {receptor_pdbqt_file} '
-                f'--ligand temp_ligand.pdbqt '
-                f'--center_x {cx:.4f} --center_y {cy:.4f} --center_z {cz:.4f} '
-                f'--size_x {size} --size_y {size} --size_z {size} '
-                f'--exhaustiveness {exhaustiveness}'
-            ).read()
+                    # Prepare for docking
+                    preparer = MoleculePreparation()
+                    prepared_list = preparer.prepare(ligand_mol)
+                    assert len(prepared_list) == 1
+                    prepared = prepared_list[0]
+                    writer = PDBQTWriterLegacy()
+                    pdbqt_string, success, error_msg = writer.write_string(prepared)
+                    assert success, error_msg
+                    # Write ligand to a unique temp path
+                    with open(lig_pdbqt, "w") as f:
+                        f.write(pdbqt_string)
+                else:
+                    # RDKit -> molblock (SDF text)
+                    molblock = Chem.MolToMolBlock(ligand_mol, kekulize=False)
+                    # pybel read and write PDBQT
+                    obmol = pybel.readstring("sdf", molblock)
+                    obmol.write("pdbqt", lig_pdbqt, overwrite=True)
 
+                # run QuickVina 2 (optionally in score-only mode)
+                cmd = (
+                    f'qvina2 --receptor "{receptor_pdbqt_file}" '
+                    f'--ligand "{lig_pdbqt}" '
+                    f'--center_x {cx:.4f} --center_y {cy:.4f} --center_z {cz:.4f} '
+                    f'--size_x {size} --size_y {size} --size_z {size} '
+                    f'--exhaustiveness {exhaustiveness}'
+                )
+                if score_only:
+                    cmd += ' --score_only'
+                out = os.popen(cmd).read()
+                # write out into a log file named docking_log.txt in working directory, uncomment for debugging
+                # with open("docking_log.txt", "a") as log_file:
+                #     log_file.write(out + "\n")
+
+            # Parse output: docking table (normal mode) or Affinity line (score-only)
             if '-----+------------+----------+----------' not in out:
-                score = np.nan    
-                return score
+                # Try to parse score-only style output: "Affinity: <value> (kcal/mol)"
+                try:
+                    import re
+                    m = re.search(r'Affinity:\s*([-+]?\d*\.?\d+)', out)
+                    if m:
+                        score = float(m.group(1))
+                        return -score
+                    else:
+                        raise ValueError("No docking score found in output.")
+                except Exception:
+                    pass
+                # score = np.nan
+                # return -score
 
             out_split = out.splitlines()
             best_idx = out_split.index('-----+------------+----------+----------') + 1

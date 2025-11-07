@@ -3,6 +3,8 @@ from argparse import Namespace
 from typing import Optional
 from time import time
 from pathlib import Path
+from concurrent import futures
+import os
 
 import numpy as np
 import torch
@@ -965,55 +967,87 @@ class LigandPocketDDPM(pl.LightningModule):
             xh_lig, xh_pocket, lig_mask, pocket_mask, rollout_buffer= \
                 self.ddpm.rl_given_pocket(pocket, num_nodes_lig, return_frames=1, timesteps=None, ppo_config=ppo_config, inference_interval=ppo_config.inference_interval, optimizer=None, pocket_com_before=pocket_com_before)
 
+        # Move generated molecule back to the original pocket position
+        pocket_com_after = scatter_mean(
+            xh_pocket[:, :self.x_dims], pocket_mask, dim=0)
+
+        xh_pocket[:, :self.x_dims] += \
+            (pocket_com_before - pocket_com_after)[pocket_mask]
+        xh_lig[:, :self.x_dims] += \
+            (pocket_com_before - pocket_com_after)[lig_mask]
 
         # Compute rewards and advantages if a reward function is provided
         episodic_metrics = {}
         molecules = []
-        atom_types = []
-        aa_types = []
-        receptors = []
         rewards = []
         if hasattr(ppo_config, "reward_fn") and callable(ppo_config.reward_fn):
 
             x = xh_lig[:, :self.x_dims].detach().cpu()
             atom_type = xh_lig[:, self.x_dims:].argmax(1).detach().cpu()
-            # lig_mask = lig_mask.cpu()
+            mol_pcs = list(
+                zip(
+                    utils.batch_to_list(x, lig_mask.cpu()),
+                    utils.batch_to_list(atom_type, lig_mask.cpu()),
+                )
+            )
 
-            for mol_pc in zip(utils.batch_to_list(x, lig_mask.cpu()),
-                    utils.batch_to_list(atom_type, lig_mask.cpu())):
+            def _compute_reward(mol_pc):
+                try:
+                    mol = build_molecule(*mol_pc, self.dataset_info, add_coords=True)
+                    if not utils.check_molecule_connectivity(mol):
+                        return None, float(np.random.uniform(-1.0, 0.0))
+                    mol = process_molecule(
+                        mol,
+                        add_hydrogens=False,
+                        sanitize=sanitize,
+                        relax_iter=relax_iter,
+                        largest_frag=largest_frag,
+                    )
+                    if mol is None:
+                        return None, float(np.random.uniform(-0.1, 0.0))
+                    r = ppo_config.reward_fn(mol)
+                    # if isinstance(r, (tuple, list)):
+                    #     r = r[0]
+                    # if r is None or not np.isfinite(r):
+                    #     r = float(np.random.uniform(-0.1, 0.0))
+                    return mol, float(r)
+                except Exception:
+                    return None, float(np.random.uniform(-0.1, 0.0))
 
-                mol = build_molecule(*mol_pc, self.dataset_info, add_coords=True)
-                connectivity = utils.check_molecule_connectivity(mol)
-                if not connectivity:
-                    rewards.append(np.random.uniform(-1, 0.0))
-                    continue
-                mol = process_molecule(mol,
-                                    add_hydrogens=False,
-                                    sanitize=sanitize,
-                                    relax_iter=relax_iter,
-                                    largest_frag=largest_frag)
-                molecules.append(mol)
+            max_workers = getattr(ppo_config, "reward_num_workers", None)
+            if max_workers is None:
+                # Default to 1 to avoid collisions for reward fns that write temp files
+                max_workers = 3
+
+            with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(executor.map(_compute_reward, mol_pcs))
+
+            rewards_list = []
+            for mol, r in results:
                 if mol is not None:
-                    rewards.append(ppo_config.reward_fn(mol))
-                else:
-                    rewards.append(np.random.uniform(-0.1, 0.0))
-            # atom_types.extend(atom_type.tolist())
-            # aa_types.extend(xh_pocket[:, self.x_dims:].argmax(1).detach().cpu().tolist())
+                    molecules.append(mol)
+                rewards_list.append(float(r))
 
-            # reward_fn should return a tensor of shape (n_samples,)
-            # rewards = ppo_config.reward_fn(
-            #     x_lig=x_lig, h_lig=h_lig, lig_mask=lig_mask, pocket=pocket
-            # )
-            # if not torch.is_tensor(rewards):
-            #     rewards = torch.as_tensor(rewards, device=device, dtype=torch.float32)
-            print("Rewards: ", rewards)
-            rewards = torch.tensor(rewards, device=self.device)
-            advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-            episodic_metrics["rewards"] = rewards.mean().item()
-            episodic_metrics["advantages"] = advantages.mean().item()
+            rewards = torch.tensor(rewards_list, device=self.device, dtype=torch.float32)
+            rewards_mean = rewards.mean()
+            rewards_std = rewards.std()
+            advantages = (rewards - rewards_mean) / (rewards_std + 1e-8)
+            episodic_metrics["rewards"] = rewards_mean.item()
+            episodic_metrics["reward_std"] = rewards_std.item()
+            episodic_metrics["valid_rate"] = float(len(molecules)) / float(len(rewards_list)) if len(rewards_list) > 0 else 0.0
         else:
-            # No reward provided; zero-advantages prevents updates
+            # No reward function provided; zero-advantages prevents updates
+            print("No reward function provided in PPO config; skipping reward computation.")
+            rewards = torch.zeros(n_samples, device=self.device)
             advantages = torch.zeros(n_samples, device=self.device)
+        
+        # print(f"Rollout ligand sizes: {num_nodes_lig}")
+        # print(f"Rollout rewards: {rewards_list}")p
+
+        
+        dict_ligsize_reward = {sz: rw for sz, rw in zip(num_nodes_lig.tolist(), rewards_list)}
+        print(f"Rollout ligand sizes and rewards: {dict_ligsize_reward} ")
+        print(f"Rollout rewards mean: {rewards.mean().item()}, std: {rewards.std().item()}")
 
         # PPO update
         # Time indices
@@ -1024,6 +1058,11 @@ class LigandPocketDDPM(pl.LightningModule):
         t_norm_all = rollout_buffer.t_steps / ppo_config.max_time_steps
 
         np.random.shuffle(time_indices)
+
+        approx_kl_vals = []
+        clipfrac_vals = []
+        loss_vals = []
+
         for start in range(0, ppo_config.episode_length, ppo_config.batch_size):
             end = min(start + ppo_config.batch_size, ppo_config.episode_length)
             indices = time_indices[start:end]
@@ -1052,6 +1091,10 @@ class LigandPocketDDPM(pl.LightningModule):
                 total_loss = 0.0
                 loss_i = torch.mean(torch.maximum(unclipped, clipped))
                 total_loss = total_loss + loss_i
+                # Diagnostics similar to ddpo
+                approx_kl_vals.append(0.5 * torch.mean((new_log_prob - old_log_prob) ** 2).detach().item())
+                clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach().item())
+                loss_vals.append(loss_i.detach().item())
                 # with torch.no_grad():
                 #     # Also add KL penalty to the pretrained model to prevent
                 #     # catastrophic policy updates
@@ -1075,6 +1118,12 @@ class LigandPocketDDPM(pl.LightningModule):
                 optimizer.step()
 
         metrics = {"rewards": rewards.mean().item()}
+        if approx_kl_vals:
+            metrics.update({
+                "approx_kl": float(np.mean(approx_kl_vals)),
+                "clipfrac": float(np.mean(clipfrac_vals)),
+                "loss": float(np.mean(loss_vals)),
+            })
         return metrics, molecules
 
     def configure_gradient_clipping(self, optimizer,

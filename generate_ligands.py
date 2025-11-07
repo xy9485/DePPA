@@ -91,14 +91,15 @@ if __name__ == "__main__":
         reward_fn=partial(model.molecule_properties.calculate_docking_score,
                           center_xyz=mean_coord_reference_ligand,
                           receptor_pdbqt_file=args.receptor_file,
-                          use_meeko=False
+                          use_meeko=False,
+                          score_only=True
                           ),
     )
     wandb.init(
         project="DiffSBDD-PPO",
         mode="offline",
         group="DiffSBDD-PPO-DockingScore",
-        # name = run_name,
+        name="score_only_"+pdb_id,
         config=vars(ppo_config),
     )
     wandb_logger = LoggerWandb()
