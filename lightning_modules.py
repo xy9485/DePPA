@@ -1,3 +1,4 @@
+from collections import defaultdict
 import math
 from argparse import Namespace
 from typing import Optional
@@ -31,6 +32,7 @@ from analysis.docking import smina_score
 
 from types import SimpleNamespace
 from rdkit import Chem
+from scipy.stats import norm
 
 class LigandPocketDDPM(pl.LightningModule):
     def __init__(
@@ -980,10 +982,11 @@ class LigandPocketDDPM(pl.LightningModule):
         episodic_metrics = {}
         molecules = []
         rewards = []
-        if hasattr(ppo_config, "reward_fn") and callable(ppo_config.reward_fn):
+        if hasattr(ppo_config, "reward_fn_dict"):
 
             x = xh_lig[:, :self.x_dims].detach().cpu()
             atom_type = xh_lig[:, self.x_dims:].argmax(1).detach().cpu()
+            aa_type = xh_pocket[:, self.x_dims:].argmax(1).detach().cpu()
             mol_pcs = list(
                 zip(
                     utils.batch_to_list(x, lig_mask.cpu()),
@@ -992,27 +995,38 @@ class LigandPocketDDPM(pl.LightningModule):
             )
 
             def _compute_reward(mol_pc):
-                try:
-                    mol = build_molecule(*mol_pc, self.dataset_info, add_coords=True)
-                    if not utils.check_molecule_connectivity(mol):
-                        return None, float(np.random.uniform(-1.0, 0.0))
-                    mol = process_molecule(
-                        mol,
-                        add_hydrogens=False,
-                        sanitize=sanitize,
-                        relax_iter=relax_iter,
-                        largest_frag=largest_frag,
-                    )
-                    if mol is None:
-                        return None, float(np.random.uniform(-0.1, 0.0))
-                    r = ppo_config.reward_fn(mol)
-                    # if isinstance(r, (tuple, list)):
-                    #     r = r[0]
-                    # if r is None or not np.isfinite(r):
-                    #     r = float(np.random.uniform(-0.1, 0.0))
-                    return mol, float(r)
-                except Exception:
-                    return None, float(np.random.uniform(-0.1, 0.0))
+                # create a reward_dict based on keys in ppo_config.reward_fn_dict
+                reward_dict = {'valid': 0} # valid indicates check_molecule_connectivity and sanitization check
+                for key in ppo_config.reward_fn_dict:
+                    reward_dict[key] = 0.0
+                mol = build_molecule(*mol_pc, self.dataset_info, add_coords=True)
+                if not utils.check_molecule_connectivity(mol):
+                    return None, reward_dict
+                mol = process_molecule(
+                    mol,
+                    add_hydrogens=False,
+                    sanitize=sanitize,
+                    relax_iter=relax_iter,
+                    largest_frag=largest_frag,
+                )
+                if mol is None: # Sanitization failed
+                    return None, reward_dict
+                # r = ppo_config.reward_fn(mol)
+                reward_dict['valid'] = 1
+                if 'qed' in ppo_config.reward_fn_dict:
+                    reward_dict['qed'] = ppo_config.reward_fn_dict['qed'](mol)
+
+                if 'sa' in ppo_config.reward_fn_dict:
+                    reward_dict['sa'] = ppo_config.reward_fn_dict['sa'](mol)
+
+                if 'docking_score' in ppo_config.reward_fn_dict:
+                    reward_dict['docking_score'] = ppo_config.reward_fn_dict['docking_score'](mol)
+
+                # if isinstance(r, (tuple, list)):
+                #     r = r[0]
+                # if r is None or not np.isfinite(r):
+                #     r = float(np.random.uniform(-0.1, 0.0))
+                return mol, reward_dict
 
             max_workers = getattr(ppo_config, "reward_num_workers", None)
             if max_workers is None:
@@ -1022,19 +1036,79 @@ class LigandPocketDDPM(pl.LightningModule):
             with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 results = list(executor.map(_compute_reward, mol_pcs))
 
-            rewards_list = []
-            for mol, r in results:
+            analyze_out = self.analyze_sample(mol_pcs, atom_type.tolist(), aa_type.tolist(), receptors=None)
+            # rewards_list = []
+            properties_dict = defaultdict(list)
+            for mol, reward_dict in results:
                 if mol is not None:
                     molecules.append(mol)
-                rewards_list.append(float(r))
+                # rewards_list.append(reward_dict['rew'])  # Example: add diversity bonus
+                for key, value in reward_dict.items():
+                    properties_dict[key].append(value)
+            list_qed = properties_dict['qed']
+            list_sa = properties_dict['sa']
+            list_docking = properties_dict['docking_score']
+            list_valid = properties_dict['valid']
 
-            rewards = torch.tensor(rewards_list, device=self.device, dtype=torch.float32)
+            # list of penalty for sa if lower than 0.5, else 0, leave invalids ignored
+            list_sa_penalty = list(list_sa)  # make a copy
+            for i in range(len(list_sa)):
+                if list_valid[i] == 0:
+                    continue
+                if list_sa[i] < 0.7:
+                    list_sa_penalty[i] = list_sa[i] - 0.7  # negative penalty
+                else:
+                    list_sa_penalty[i] = 0.0
+
+            # Compute ranks for each property, range (0,1)
+            norm_qed = utils.rank01_masked(list_qed, list_valid, rescale=False)
+            norm_sa = utils.rank01_masked(list_sa, list_valid, rescale=False)
+            # norm_sa = utils.rank01_masked(list_sa_penalty, list_valid, rescale=False)
+            norm_docking = utils.rank01_masked(list_docking, list_valid, rescale=False)
+
+            # norm_qed = utils.percentile_rank_masked(list_qed, list_valid, rescale=False)
+            # # norm_sa = utils.percentile_rank_masked(list_sa, list_valid, rescale=False)
+            # norm_sa = utils.percentile_rank_masked(list_sa_penalty, list_valid, rescale=False)
+            # norm_docking = utils.percentile_rank_masked(list_docking, list_valid, rescale=False)
+
+            # Map to N(0,1); “rank-to-normal” transform or “quantile normalization.”
+            norm_qed = utils.pct_to_normal(norm_qed)
+            norm_sa = utils.pct_to_normal(norm_sa)
+            norm_docking = utils.pct_to_normal(norm_docking)
+
+            # Combine valid scores
+            combined = np.zeros(len(results), np.float32)
+            valid_idx = np.where(list_valid)[0]
+            if valid_idx.size > 0:
+                norm_qed = np.nan_to_num(norm_qed,  nan=0.0)
+                norm_sa = np.nan_to_num(norm_sa,   nan=0.0)
+                norm_docking = np.nan_to_num(norm_docking, nan=0.0)
+                combined = norm_qed * 0.4 + norm_sa * 0.2 + norm_docking * 0.4
+            
+            # Assign fixed penalty to invalids
+            FIXED_INVALID_PENALTY = -3.09 # norm.ppf(1e-3) ≈ -3.09
+            # FIXED_INVALID_PENALTY = -1.0 + 1e-4
+            combined[~np.asarray(list_valid, bool)] = FIXED_INVALID_PENALTY
+
+            # combined = np.array(list_qed) * 0.8 + np.array(list_sa) * 0.2 + np.array(list_docking) * 0.1
+            # combined[~np.asarray(list_valid, bool)] = -1.0
+
+            rewards = torch.tensor(combined, device=self.device, dtype=torch.float32)
             rewards_mean = rewards.mean()
             rewards_std = rewards.std()
             advantages = (rewards - rewards_mean) / (rewards_std + 1e-8)
-            episodic_metrics["rewards"] = rewards_mean.item()
-            episodic_metrics["reward_std"] = rewards_std.item()
-            episodic_metrics["valid_rate"] = float(len(molecules)) / float(len(rewards_list)) if len(rewards_list) > 0 else 0.0
+            episodic_metrics["combined_rewards"] = rewards_mean.item()
+            episodic_metrics["combined_reward_std"] = rewards_std.item()
+            episodic_metrics["qed"] = np.mean(properties_dict.get('qed', [0.0]*len(results)))
+            episodic_metrics["sa"] = np.mean(properties_dict.get('sa', [0.0]*len(results)))
+            episodic_metrics["docking_score"] = np.mean(properties_dict.get('docking_score', [0.0]*len(results)))
+            episodic_metrics["valid_rate"] = float(len(molecules)) / float(len(results)) if len(results) > 0 else 0.0
+            episodic_metrics["diversity"] = analyze_out['Diversity']
+            # episodic_metrics["qed"] = analyze_out['QED']
+            # episodic_metrics["sa"] = analyze_out['SA']
+            # episodic_metrics["logp"] = analyze_out['LogP']
+            episodic_metrics["Validity"] = analyze_out['Validity']
+            episodic_metrics["Connectivity"] = analyze_out['Connectivity']
         else:
             # No reward function provided; zero-advantages prevents updates
             print("No reward function provided in PPO config; skipping reward computation.")
@@ -1044,10 +1118,17 @@ class LigandPocketDDPM(pl.LightningModule):
         # print(f"Rollout ligand sizes: {num_nodes_lig}")
         # print(f"Rollout rewards: {rewards_list}")p
 
+        # temp_metric = MoleculeProperties()
+        # pocket_rdmols = []
+        # if len(molecules) > 0:
+        #     (validity, connectivity, uniqueness, novelty), (_, connected_mols) = self.ligand_metrics.evaluate_rdmols(molecules)
+
+        #     qed, sa, logp, lipinski, diversity = self.molecule_properties.evaluate_mean(connected_mols)
         
-        dict_ligsize_reward = {sz: rw for sz, rw in zip(num_nodes_lig.tolist(), rewards_list)}
-        print(f"Rollout ligand sizes and rewards: {dict_ligsize_reward} ")
-        print(f"Rollout rewards mean: {rewards.mean().item()}, std: {rewards.std().item()}")
+        # dict_ligsize_reward = {str(sz): rw for sz, rw in zip(num_nodes_lig.tolist(), rewards_list)}
+        # print(f"Rollout ligand sizes and rewards: {dict_ligsize_reward} ")
+        print("Episodic metrics:", episodic_metrics)
+        print(f"Rollout combined rewards mean: {rewards.mean().item()}, std: {rewards.std().item()}")
 
         # PPO update
         # Time indices
@@ -1092,7 +1173,7 @@ class LigandPocketDDPM(pl.LightningModule):
                 loss_i = torch.mean(torch.maximum(unclipped, clipped))
                 total_loss = total_loss + loss_i
                 # Diagnostics similar to ddpo
-                approx_kl_vals.append(0.5 * torch.mean((new_log_prob - old_log_prob) ** 2).detach().item())
+                approx_kl_vals.append(0.5 * torch.mean(logratio ** 2).detach().item())
                 clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach().item())
                 loss_vals.append(loss_i.detach().item())
                 # with torch.no_grad():
@@ -1117,14 +1198,15 @@ class LigandPocketDDPM(pl.LightningModule):
                                                 max_norm=1.0)
                 optimizer.step()
 
-        metrics = {"rewards": rewards.mean().item()}
-        if approx_kl_vals:
-            metrics.update({
-                "approx_kl": float(np.mean(approx_kl_vals)),
-                "clipfrac": float(np.mean(clipfrac_vals)),
-                "loss": float(np.mean(loss_vals)),
-            })
-        return metrics, molecules
+        # metrics = {"rewards": rewards.mean().item()}
+
+        episodic_metrics.update({
+            "approx_kl": float(np.mean(approx_kl_vals)),
+            "clipfrac": float(np.mean(clipfrac_vals)),
+            "loss": float(np.mean(loss_vals)),
+        })
+
+        return episodic_metrics, molecules
 
     def configure_gradient_clipping(self, optimizer,
                                     gradient_clip_val, gradient_clip_algorithm):

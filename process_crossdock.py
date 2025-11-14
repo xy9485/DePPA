@@ -27,8 +27,8 @@ if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
     import debugpy
 
     # Use any open port, e.g., 5678
-    debugpy.listen(("0.0.0.0", 5678))
-    print("🔍 Waiting for debugger attach on port 5678...")
+    debugpy.listen(("0.0.0.0", 5675))
+    print("🔍 Waiting for debugger attach on port 5675...")
     debugpy.wait_for_client()
 
 def process_ligand_and_pocket(pdbfile, sdffile,

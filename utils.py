@@ -7,7 +7,7 @@ from rdkit import Chem
 import networkx as nx
 from networkx.algorithms import isomorphism
 from Bio.PDB.Polypeptide import is_aa
-
+from scipy.stats import norm
 
 class Queue():
     def __init__(self, max_len=50):
@@ -250,3 +250,58 @@ def check_molecule_connectivity(mol):
             return False
     
     return True
+
+def rank01(x: list):
+    x = np.asarray(x, np.float32)
+    r = np.argsort(np.argsort(x))  # 0..N-1
+    return (r + 0.5) / len(x)      # (0,1)
+
+def percentile_rank(values):
+    arr = np.asarray(values, dtype=float)
+    ranks = np.array([ (arr < v).mean() for v in arr ], dtype=np.float32)
+    return ranks
+
+# def percentile_rank(value, all_values):
+#     arr = np.asarray(all_values, dtype=float)
+#     # compute empirical CDF position
+#     rank = (arr < value).mean()
+#     return float(rank)
+
+def rank01_masked(vals, valid, rescale=False):
+    assert len(vals) == len(valid)
+    vals = np.asarray(vals, np.float32)
+    valid = np.asarray(valid, bool)
+    out = np.full_like(vals, np.nan, dtype=np.float32)
+    idx = np.where(valid)[0]
+    if idx.size == 0:
+        return out
+    sub = vals[idx]
+    r = np.argsort(np.argsort(sub))          # 0..n-1
+    out[idx] = (r + 0.5) / idx.size          # (0,1) centered percentiles
+    if rescale:
+        out[idx] = out[idx] * 2.0 - 1.0      # rescale to (-1,1)
+    return out
+
+def percentile_rank_masked(vals, valid, rescale=False):
+    assert len(vals) == len(valid)
+    vals = np.asarray(vals, np.float32)
+    valid = np.asarray(valid, bool)
+    out = np.full_like(vals, np.nan, dtype=np.float32)
+    idx = np.where(valid)[0]
+    if idx.size == 0:
+        return out
+    sub = vals[idx]
+    out[idx] = np.array([ (sub < v).mean() for v in sub ], dtype=np.float32)
+    out[idx] += 0.5 / sub.size
+    # clamp to (1e-6, 1-1e-6)
+    out[idx] = np.clip(out[idx], 1e-6, 1.0 - 1e-6)
+    if rescale:
+        out[idx] = out[idx] * 2.0 - 1.0      # rescale to (-1,1)
+    return out
+
+def pct_to_normal(p, eps=1e-3):
+    z = np.full_like(p, np.nan, dtype=np.float32)
+    m = ~np.isnan(p)
+    if m.any():
+        z[m] = norm.ppf(np.clip(p[m], eps, 1.0 - eps)).astype(np.float32)
+    return z

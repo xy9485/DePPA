@@ -63,20 +63,32 @@ if __name__ == "__main__":
     # for p in model.ddpm_pretrained.parameters():
     #     p.requires_grad_(False)
 
-    if args.num_nodes_lig is not None:
-        num_nodes_lig = torch.ones(args.n_samples, dtype=int) * \
-                        args.num_nodes_lig
-    else:
-        num_nodes_lig = None
-
     # Identify mean coord of ligand for centering box for docking score computing, such as qvina2
     structure = PDBParser(QUIET=True).get_structure("", args.pdbfile)[0]
     chain_id, resi = args.ref_ligand.split(':')
     lig_res = utils.get_residue_with_resi(structure[chain_id], int(resi))
     coords = np.array([a.get_coord() for a in lig_res.get_atoms()])
     mean_coord_reference_ligand = coords.mean(axis=0)
+    ligand_size = coords.shape[0]
+    args.num_nodes_lig = ligand_size
+    print(f"Reference ligand has {ligand_size} atoms.")
 
+    if args.num_nodes_lig is not None:
+        num_nodes_lig = torch.ones(args.n_samples, dtype=int) * \
+                        args.num_nodes_lig
+    else:
+        num_nodes_lig = None
     # RL 
+    reward_fn_dict = {
+        'qed': model.molecule_properties.calculate_qed,
+        'sa': model.molecule_properties.calculate_sa,
+        'docking_score': partial(model.molecule_properties.calculate_docking_score,
+                          center_xyz=mean_coord_reference_ligand,
+                          receptor_pdbqt_file=args.receptor_file,
+                          use_meeko=False,
+                          score_only=True
+                          ),
+    }
     ppo_config = SimpleNamespace(
         clip_range=0.2,
         max_grad_norm=0.5,
@@ -88,22 +100,23 @@ if __name__ == "__main__":
         lr=1e-5,
         # reward_fn=model.molecule_properties.calculate_qed,
         # reward_fn=model.molecule_properties.calculate_sa,
-        reward_fn=partial(model.molecule_properties.calculate_docking_score,
-                          center_xyz=mean_coord_reference_ligand,
-                          receptor_pdbqt_file=args.receptor_file,
-                          use_meeko=False,
-                          score_only=True
-                          ),
+        # reward_fn=partial(model.molecule_properties.calculate_docking_score,
+        #                   center_xyz=mean_coord_reference_ligand,
+        #                   receptor_pdbqt_file=args.receptor_file,
+        #                   use_meeko=False,
+        #                   score_only=True
+        #                   ),
+        reward_fn_dict=reward_fn_dict,
     )
     wandb.init(
         project="DiffSBDD-PPO",
         mode="offline",
         group="DiffSBDD-PPO-DockingScore",
-        name="score_only_"+pdb_id,
+        name="combiRew_fixLigSize_qed4sa2dock4_"+pdb_id,
         config=vars(ppo_config),
     )
     wandb_logger = LoggerWandb()
-    for i in range(600):
+    for i in range(500):
         metrics, molecules = model.generate_ligands_rl(
             args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
             num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,
