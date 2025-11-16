@@ -31,8 +31,9 @@ from analysis.molecule_builder import build_molecule, process_molecule
 from analysis.docking import smina_score
 
 from types import SimpleNamespace
-from rdkit import Chem
+from rdkit import Chem, DataStructs
 from scipy.stats import norm
+from functools import partial
 
 class LigandPocketDDPM(pl.LightningModule):
     def __init__(
@@ -994,33 +995,43 @@ class LigandPocketDDPM(pl.LightningModule):
                 )
             )
 
-            def _compute_reward(mol_pc):
-                # create a reward_dict based on keys in ppo_config.reward_fn_dict
+            def _compute_reward(mol_pc, reward_fn_dict, add_hydrogens, sanitize, relax_iter, largest_frag):
+                # create a reward_dict based on keys in reward_fn_dict
                 reward_dict = {'valid': 0} # valid indicates check_molecule_connectivity and sanitization check
-                for key in ppo_config.reward_fn_dict:
+                for key in reward_fn_dict:
                     reward_dict[key] = 0.0
                 mol = build_molecule(*mol_pc, self.dataset_info, add_coords=True)
+
+                # identify if there are isolated atoms
                 if not utils.check_molecule_connectivity(mol):
                     return None, reward_dict
+                n_mol_atoms = mol.GetNumAtoms()
                 mol = process_molecule(
                     mol,
-                    add_hydrogens=False,
+                    add_hydrogens=add_hydrogens,
                     sanitize=sanitize,
                     relax_iter=relax_iter,
                     largest_frag=largest_frag,
                 )
                 if mol is None: # Sanitization failed
                     return None, reward_dict
+
+                # check connectivity threshold
+                # mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True)
+                # largest_mol = max(mol_frags, default=mol, key=lambda m: m.GetNumAtoms())
+                # if not mol.GetNumAtoms() / n_mol_atoms >= self.ligand_metrics.connectivity_thresh:
+                #     return None, reward_dict
+
+                  # to ensure molecule is processed
                 # r = ppo_config.reward_fn(mol)
                 reward_dict['valid'] = 1
-                if 'qed' in ppo_config.reward_fn_dict:
-                    reward_dict['qed'] = ppo_config.reward_fn_dict['qed'](mol)
+                if 'qed' in reward_fn_dict:
+                    reward_dict['qed'] = reward_fn_dict['qed'](mol)
 
-                if 'sa' in ppo_config.reward_fn_dict:
-                    reward_dict['sa'] = ppo_config.reward_fn_dict['sa'](mol)
-
-                if 'docking_score' in ppo_config.reward_fn_dict:
-                    reward_dict['docking_score'] = ppo_config.reward_fn_dict['docking_score'](mol)
+                if 'sa' in reward_fn_dict:
+                    reward_dict['sa'] = reward_fn_dict['sa'](mol)
+                if 'docking_score' in reward_fn_dict:
+                    reward_dict['docking_score'] = reward_fn_dict['docking_score'](mol)
 
                 # if isinstance(r, (tuple, list)):
                 #     r = r[0]
@@ -1028,13 +1039,36 @@ class LigandPocketDDPM(pl.LightningModule):
                 #     r = float(np.random.uniform(-0.1, 0.0))
                 return mol, reward_dict
 
+            def _compute_fps_distances(results):
+                mol_list = [mol for mol, _ in results] 
+                fps = [Chem.RDKFingerprint(m) if m is not None else None for m in mol_list]
+                div_raw = np.zeros(len(mol_list), np.float32)
+                for i, fpi in enumerate(fps):
+                    if fpi is None:
+                        continue
+                    sims = [
+                        DataStructs.TanimotoSimilarity(fpi, fpj)
+                        for j, fpj in enumerate(fps)
+                        if j != i and fpj is not None
+                    ]
+                    if sims:
+                        div_raw[i] = 1.0 - np.mean(sims)  # “how different mol i is from others”
+                return div_raw
+
             max_workers = getattr(ppo_config, "reward_num_workers", None)
             if max_workers is None:
                 # Default to 1 to avoid collisions for reward fns that write temp files
                 max_workers = 3
-
+            reward_worker = partial(
+                _compute_reward,
+                reward_fn_dict=ppo_config.reward_fn_dict,
+                add_hydrogens=False,            # or expose as a function argument
+                sanitize=sanitize,
+                relax_iter=relax_iter,
+                largest_frag=largest_frag,
+            )
             with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                results = list(executor.map(_compute_reward, mol_pcs))
+                results = list(executor.map(reward_worker, mol_pcs))
 
             analyze_out = self.analyze_sample(mol_pcs, atom_type.tolist(), aa_type.tolist(), receptors=None)
             # rewards_list = []
@@ -1049,6 +1083,7 @@ class LigandPocketDDPM(pl.LightningModule):
             list_sa = properties_dict['sa']
             list_docking = properties_dict['docking_score']
             list_valid = properties_dict['valid']
+            list_distance = _compute_fps_distances(results)
 
             # list of penalty for sa if lower than 0.5, else 0, leave invalids ignored
             list_sa_penalty = list(list_sa)  # make a copy
@@ -1065,6 +1100,7 @@ class LigandPocketDDPM(pl.LightningModule):
             norm_sa = utils.rank01_masked(list_sa, list_valid, rescale=False)
             # norm_sa = utils.rank01_masked(list_sa_penalty, list_valid, rescale=False)
             norm_docking = utils.rank01_masked(list_docking, list_valid, rescale=False)
+            norm_distance = utils.rank01_masked(list_distance, list_valid, rescale=False)
 
             # norm_qed = utils.percentile_rank_masked(list_qed, list_valid, rescale=False)
             # # norm_sa = utils.percentile_rank_masked(list_sa, list_valid, rescale=False)
@@ -1075,6 +1111,7 @@ class LigandPocketDDPM(pl.LightningModule):
             norm_qed = utils.pct_to_normal(norm_qed)
             norm_sa = utils.pct_to_normal(norm_sa)
             norm_docking = utils.pct_to_normal(norm_docking)
+            norm_distance = utils.pct_to_normal(norm_distance)
 
             # Combine valid scores
             combined = np.zeros(len(results), np.float32)
@@ -1083,7 +1120,8 @@ class LigandPocketDDPM(pl.LightningModule):
                 norm_qed = np.nan_to_num(norm_qed,  nan=0.0)
                 norm_sa = np.nan_to_num(norm_sa,   nan=0.0)
                 norm_docking = np.nan_to_num(norm_docking, nan=0.0)
-                combined = norm_qed * 0.4 + norm_sa * 0.2 + norm_docking * 0.4
+                norm_distance = np.nan_to_num(norm_distance, nan=0.0)
+                combined = norm_qed * 0.3 + norm_sa * 0.1 + norm_docking * 0.35 + norm_distance * 0.25 
             
             # Assign fixed penalty to invalids
             FIXED_INVALID_PENALTY = -3.09 # norm.ppf(1e-3) ≈ -3.09

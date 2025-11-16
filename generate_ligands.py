@@ -13,9 +13,10 @@ from lightning_modules import LigandPocketDDPM
 from Bio.PDB import PDBParser
 
 import numpy as np
-
+from rdkit import Chem
 from functools import partial
-
+import AutoDockTools
+import subprocess
 import os
 if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
     import debugpy
@@ -44,7 +45,8 @@ if __name__ == "__main__":
     parser.add_argument('--timesteps', type=int, default=None)
     args = parser.parse_args()
 
-    pdb_id = Path(args.pdbfile).stem
+    # get pdb_id of 4 characters from the beginning of the pdbfile name
+    pdb_id = Path(args.pdbfile).stem[:4]
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -64,27 +66,52 @@ if __name__ == "__main__":
     #     p.requires_grad_(False)
 
     # Identify mean coord of ligand for centering box for docking score computing, such as qvina2
-    structure = PDBParser(QUIET=True).get_structure("", args.pdbfile)[0]
-    chain_id, resi = args.ref_ligand.split(':')
-    lig_res = utils.get_residue_with_resi(structure[chain_id], int(resi))
-    coords = np.array([a.get_coord() for a in lig_res.get_atoms()])
-    mean_coord_reference_ligand = coords.mean(axis=0)
-    ligand_size = coords.shape[0]
-    args.num_nodes_lig = ligand_size
+    if args.ref_ligand.endswith(".sdf"):
+        # ligand as sdf file
+        rdmol = Chem.SDMolSupplier(str(args.ref_ligand))[0]
+        ligand_coords = torch.from_numpy(rdmol.GetConformer().GetPositions()).float()
+    else:
+        structure = PDBParser(QUIET=True).get_structure("", args.pdbfile)[0]
+        chain_id, resi = args.ref_ligand.split(':')
+        lig_res = utils.get_residue_with_resi(structure[chain_id], int(resi))
+        ligand_coords = np.array([a.get_coord() for a in lig_res.get_atoms()])
+    mean_coord_reference_ligand = ligand_coords.mean(axis=0)
+    ligand_size = ligand_coords.shape[0]
     print(f"Reference ligand has {ligand_size} atoms.")
 
     if args.num_nodes_lig is not None:
-        num_nodes_lig = torch.ones(args.n_samples, dtype=int) * \
-                        args.num_nodes_lig
+        num_nodes_lig = args.num_nodes_lig
     else:
-        num_nodes_lig = None
+        num_nodes_lig = torch.ones(args.n_samples, dtype=int) * ligand_size
+        # num_nodes_lig = None
     # RL 
+
+    # prepare_receptor = os.path.join(AutoDockTools.__path__[0], 'Utilities24/prepare_receptor4.py')
+
+    # tmp_folder = "/home/xue/repos/DiffSBDD/tmp"
+    # tmp_pdbfile = os.path.join(tmp_folder, f"{pdb_id}.pdb")
+
+    # # copy pdbfile to tmp folder
+    # subprocess.run(["cp", args.pdbfile, tmp_folder], check=True)
+
+    # # run prepare_receptor in tmp folder without changing global cwd
+    # subprocess.run(
+    #     ["python", prepare_receptor, "-r", tmp_pdbfile],
+    #     check=True,
+    #     cwd=tmp_folder,
+    # )
+    # Prefer an explicit receptor file if provided, otherwise derive from the pdbfile path.
+    if args.receptor_file:
+        receptor_pdbqt_file = args.receptor_file
+    else:
+        # Ensure we handle args.pdbfile as a path (it may be a string)
+        receptor_pdbqt_file = str(Path(args.pdbfile).with_suffix('.pdbqt'))
     reward_fn_dict = {
         'qed': model.molecule_properties.calculate_qed,
         'sa': model.molecule_properties.calculate_sa,
         'docking_score': partial(model.molecule_properties.calculate_docking_score,
                           center_xyz=mean_coord_reference_ligand,
-                          receptor_pdbqt_file=args.receptor_file,
+                          receptor_pdbqt_file=receptor_pdbqt_file,
                           use_meeko=False,
                           score_only=True
                           ),
@@ -110,9 +137,9 @@ if __name__ == "__main__":
     )
     wandb.init(
         project="DiffSBDD-PPO",
-        mode="offline",
-        group="DiffSBDD-PPO-DockingScore",
-        name="combiRew_fixLigSize_qed4sa2dock4_"+pdb_id,
+        mode="online",
+        group="DiffSBDD-" +pdb_id,
+        name="qed4sa2dock4_"+pdb_id,
         config=vars(ppo_config),
     )
     wandb_logger = LoggerWandb()
