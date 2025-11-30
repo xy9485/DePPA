@@ -59,11 +59,6 @@ if __name__ == "__main__":
         args.checkpoint, map_location=device)
     model = model.to(device)
 
-    # model has an attribute ddpm, create a same newwork like ddpm called ddpm_copy and copy the parameters
-    # model.ddpm_pretrained = copy.deepcopy(model.ddpm).to(device)
-    # model.ddpm_pretrained.eval()
-    # for p in model.ddpm_pretrained.parameters():
-    #     p.requires_grad_(False)
 
     # Identify mean coord of ligand for centering box for docking score computing, such as qvina2
     if args.ref_ligand.endswith(".sdf"):
@@ -109,21 +104,27 @@ if __name__ == "__main__":
     reward_fn_dict = {
         'qed': model.molecule_properties.calculate_qed,
         'sa': model.molecule_properties.calculate_sa,
-        'docking_score': partial(model.molecule_properties.calculate_docking_score,
+        'vina_score': partial(model.molecule_properties.calculate_docking_score,
                           center_xyz=mean_coord_reference_ligand,
                           receptor_pdbqt_file=receptor_pdbqt_file,
                           use_meeko=False,
                           score_only=True
                           ),
+        # 'vina_dock': partial(model.molecule_properties.calculate_docking_score,
+        #                   center_xyz=mean_coord_reference_ligand,
+        #                   receptor_pdbqt_file=receptor_pdbqt_file,
+        #                   use_meeko=False,
+        #                   score_only=False
+        #                   ),  
     }
     ppo_config = SimpleNamespace(
         clip_range=0.2,
         max_grad_norm=0.5,
         max_time_steps=model.T,
         inference_interval=10,
-        n_samples=64,
-        batch_size=5,
-        sample_n_nodes=True,
+        # n_samples=64,
+        batch_size=32,
+        # sample_n_nodes=True,
         lr=1e-5,
         # reward_fn=model.molecule_properties.calculate_qed,
         # reward_fn=model.molecule_properties.calculate_sa,
@@ -134,17 +135,25 @@ if __name__ == "__main__":
         #                   score_only=True
         #                   ),
         reward_fn_dict=reward_fn_dict,
+        kl_coeff_pretrain=0.0,
     )
     wandb.init(
         project="DiffSBDD-PPO",
-        mode="online",
+        mode="offline",
         group="DiffSBDD-" +pdb_id,
-        name="qed4sa2dock4_"+pdb_id,
+        name="ii10_NormRank_Penalty-3std_QED0.27_SA0.13_Vina0.3_Distance0.3_KL0.0_"+pdb_id,
         config=vars(ppo_config),
     )
     wandb_logger = LoggerWandb()
+
+    if ppo_config.kl_coeff_pretrain > 0:
+        print(f"Using KL divergence to pretrained model with coeff {ppo_config.kl_coeff_pretrain}")
+        model.ddpm_pretrained = copy.deepcopy(model.ddpm).to(device)
+        model.ddpm_pretrained.eval()
+        for p in model.ddpm_pretrained.parameters():
+            p.requires_grad_(False)
     for i in range(500):
-        metrics, molecules = model.generate_ligands_rl(
+        metrics, sample_records = model.generate_ligands_rl(
             args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
             num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,
             relax_iter=(200 if args.relax else 0),

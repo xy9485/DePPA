@@ -264,6 +264,46 @@ class MoleculeProperties:
         fp2 = Chem.RDKFingerprint(mol_b)
         return DataStructs.TanimotoSimilarity(fp1, fp2)
 
+    @staticmethod
+    def calculate_diversity_morgan(rdmols, radius=2, n_bits=2048, use_chirality=False):
+        """
+        Compute diversity as the average pairwise Tanimoto similarity over
+        Morgan fingerprints among a set of RDKit molecules.
+
+        Args:
+            rdmols: list of RDKit Mol objects.
+            radius: Morgan fingerprint radius (default 2).
+            n_bits: Number of bits for Morgan fingerprints (default 2048).
+            use_chirality: Whether to use chiral information (default False).
+
+        Returns:
+            float: Mean pairwise Tanimoto similarity across all unique pairs.
+                   Returns 0.0 if fewer than 2 valid molecules are provided.
+        """
+        if rdmols is None or len(rdmols) < 2:
+            return 0.0
+
+        # Local import to avoid changing global imports
+        from rdkit.Chem import AllChem
+
+        # Build fingerprints; skip None entries defensively
+        fps = [
+            AllChem.GetMorganFingerprintAsBitVect(m, radius, nBits=n_bits, useChirality=use_chirality)
+            for m in rdmols if m is not None
+        ]
+
+        if len(fps) < 2:
+            return 0.0
+
+        total_pairs = 0
+        sim_sum = 0.0
+        for i in range(len(fps)):
+            for j in range(i + 1, len(fps)):
+                sim_sum += DataStructs.TanimotoSimilarity(fps[i], fps[j])
+                total_pairs += 1
+
+        return sim_sum / total_pairs if total_pairs > 0 else 0.0
+
     def evaluate(self, pocket_rdmols):
         """
         Run full evaluation

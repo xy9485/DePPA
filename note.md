@@ -23,6 +23,59 @@ model = LigandPocketDDPM.load_from_checkpoint(
 print(model.norm_values)  # -> [1, 4]
 ```
 
+---
+
+## 2025-11-20 • Batch PDB → PDBQT conversion with `docking_py27.py`
+
+Context:
+- AutoDockTools’ `prepare_receptor4.py` (Python 2.7 tooling) remains the most reliable way we have to type receptor pockets, and `analysis/docking_py27.py` batch-wraps it.
+- The `adt` conda env on the cluster already bundles Python 2.7 + MGLTools; activating it ensures `prepare_receptor4.py` is on `$PATH`.
+
+Details / Steps:
+1. Activate the AutoDockTools environment:
+  ```bash
+  conda activate adt
+  ```
+2. Run the helper with input/output directories and dataset flag (`crossdocked` or `bindingmoad`):
+  ```bash
+  python analysis/docking_py27.py <pdb_dir> <pdbqt_dir> <dataset>
+  ```
+  - `pdb_dir`: folder containing source `.pdb` pockets.
+  - `pdbqt_dir`: destination folder (create it first if needed).
+  - `dataset`: selects ADT options. `crossdocked` uses defaults; `bindingmoad` adds `-A checkhydrogens -e` to better preserve protonation info.
+3. The script loops over every `.pdb` file, writes `<name>.pdbqt` next door, and skips outputs that already exist.
+
+Implications / Gotchas:
+- `prepare_receptor4.py` is single-threaded and sensitive to missing hydrogens; CA-only pockets still convert but electrostatics are minimal.
+- Keep the `adt` env active for the entire run since the script shells out once per file.
+- For very large folders, split the directory or wrap the command in GNU Parallel manually.
+
+Notes:
+- You can call the script from Python 3 if `prepare_receptor4.py` is exposed on `$PATH`, but the `adt` environment is the cleanest setup.
+- For ligand prep, use `analysis/docking.py` (Python 3 + Meeko); this entry is strictly for receptor pocket conversions.
+
+---
+
+## 2025-11-20 • Ligand docking CLI (`analysis/docking.py`)
+
+Context:
+- `analysis/docking.py` runs ligand docking (QVina via Python 3 + Meeko) over a dataset split and expects directory-structured inputs.
+
+Details / Invocation:
+- Core arguments:
+  - `--pdbqt_dir`: receptor pocket `.pdbqt` directory.
+  - `--sdf_dir`: ligand `.sdf` directory.
+  - `--dataset`: dataset key (e.g., `crossdock`, `bindingmoad`).
+  - `--out_dir`: docking output directory (must exist or be creatable), e.g. `/home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test_qvina_out`.
+- Example:
+  ```bash
+  python analysis/docking.py \
+    --pdbqt_dir <receptor_pdbqt_dir> \
+    --sdf_dir <ligand_sdf_dir> \
+    --dataset crossdock \
+    --out_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test_qvina_out
+  ```
+
 Implications:
 - When conditioning on different pockets, `h` normalization may vary if the set of observed element types changes.
 - If downstream components assume a fixed feature scale tied to the encoder size (10), prefer using `len(self.pocket_type_encoder)` explicitly rather than `norm_values[1]`.
@@ -123,4 +176,3 @@ $$
 so sampling and likelihoods are consistent under global rotations of the
 ligand–pocket system. Practically, this preserves SE(3) coherence of the model
 and avoids orientation-dependent biases introduced by the initialization.
-

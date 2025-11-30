@@ -178,7 +178,8 @@ if __name__ == '__main__':
             receptor_file = Path(args.pdbqt_dir, receptor_name + '.pdbqt')
         elif args.dataset == 'crossdocked':
             ligand_name = sdf_file.stem
-            receptor_name = ligand_name[:-4]
+            receptor_name, pocket_id, *suffix = ligand_name.split('_')
+            # receptor_name = ligand_name[:-4]
             receptor_file = Path(args.pdbqt_dir, receptor_name + '.pdbqt')
 
         # try:

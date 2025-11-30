@@ -267,10 +267,10 @@ def percentile_rank(values):
 #     rank = (arr < value).mean()
 #     return float(rank)
 
-def rank01_masked(vals, valid, rescale=False):
-    assert len(vals) == len(valid)
-    vals = np.asarray(vals, np.float32)
-    valid = np.asarray(valid, bool)
+def rank01_masked(vals:np.ndarray, valid:np.ndarray, rescale=False):
+    assert vals.size == valid.size
+    # vals = np.asarray(vals, np.float32)
+    # valid = np.asarray(valid, bool)
     out = np.full_like(vals, np.nan, dtype=np.float32)
     idx = np.where(valid)[0]
     if idx.size == 0:
@@ -282,10 +282,10 @@ def rank01_masked(vals, valid, rescale=False):
         out[idx] = out[idx] * 2.0 - 1.0      # rescale to (-1,1)
     return out
 
-def percentile_rank_masked(vals, valid, rescale=False):
-    assert len(vals) == len(valid)
-    vals = np.asarray(vals, np.float32)
-    valid = np.asarray(valid, bool)
+def percentile_rank_masked(vals:np.ndarray, valid:np.ndarray, rescale=False):
+    assert vals.size == valid.size
+    # vals = np.asarray(vals, np.float32)
+    # valid = np.asarray(valid, bool)
     out = np.full_like(vals, np.nan, dtype=np.float32)
     idx = np.where(valid)[0]
     if idx.size == 0:
@@ -297,6 +297,22 @@ def percentile_rank_masked(vals, valid, rescale=False):
     out[idx] = np.clip(out[idx], 1e-6, 1.0 - 1e-6)
     if rescale:
         out[idx] = out[idx] * 2.0 - 1.0      # rescale to (-1,1)
+    return out
+
+def minmax_normalize_masked(vals:np.ndarray, valid:np.ndarray):
+    assert vals.size == valid.size
+    # vals = np.asarray(vals, np.float32)
+    # valid = np.asarray(valid, bool)
+    out = np.full_like(vals, np.nan, dtype=np.float32)
+    idx = np.where(valid)[0]
+    if idx.size == 0:
+        return out
+    sub = vals[idx]
+    vmin = sub.min()
+    vmax = sub.max()
+    # assert vmax - vmin > 1e-8
+    out[idx] = (sub - vmin) / (vmax - vmin + 1e-8)
+    out[idx] = np.clip(out[idx], 0.0, 1.0)
     return out
 
 def pct_to_normal(p, eps=1e-3):

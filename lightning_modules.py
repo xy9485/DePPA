@@ -983,6 +983,7 @@ class LigandPocketDDPM(pl.LightningModule):
         episodic_metrics = {}
         molecules = []
         rewards = []
+        sample_records = []
         if hasattr(ppo_config, "reward_fn_dict"):
 
             x = xh_lig[:, :self.x_dims].detach().cpu()
@@ -1017,10 +1018,11 @@ class LigandPocketDDPM(pl.LightningModule):
                     return None, reward_dict
 
                 # check connectivity threshold
-                # mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True)
-                # largest_mol = max(mol_frags, default=mol, key=lambda m: m.GetNumAtoms())
-                # if not mol.GetNumAtoms() / n_mol_atoms >= self.ligand_metrics.connectivity_thresh:
-                #     return None, reward_dict
+                if not largest_frag:
+                    mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True)
+                    largest_mol = max(mol_frags, default=mol, key=lambda m: m.GetNumAtoms())
+                    if mol.GetNumAtoms() / n_mol_atoms < self.ligand_metrics.connectivity_thresh:
+                        return None, reward_dict
 
                   # to ensure molecule is processed
                 # r = ppo_config.reward_fn(mol)
@@ -1030,8 +1032,10 @@ class LigandPocketDDPM(pl.LightningModule):
 
                 if 'sa' in reward_fn_dict:
                     reward_dict['sa'] = reward_fn_dict['sa'](mol)
-                if 'docking_score' in reward_fn_dict:
-                    reward_dict['docking_score'] = reward_fn_dict['docking_score'](mol)
+                if 'vina_score' in reward_fn_dict:
+                    reward_dict['vina_score'] = reward_fn_dict['vina_score'](mol)
+                if 'vina_dock' in reward_fn_dict:
+                    reward_dict['vina_dock'] = reward_fn_dict['vina_dock'](mol)
 
                 # if isinstance(r, (tuple, list)):
                 #     r = r[0]
@@ -1054,6 +1058,14 @@ class LigandPocketDDPM(pl.LightningModule):
                     if sims:
                         div_raw[i] = 1.0 - np.mean(sims)  # “how different mol i is from others”
                 return div_raw
+
+            def _postprocess(array, valid_array, mode='rank'):
+                if mode == 'rank':
+                    norm_array = utils.rank01_masked(array, valid_array, rescale=False)
+                elif mode == 'minmax':
+                    norm_array = utils.minmax_normalize_masked(array, valid_array)
+                norm_array = utils.pct_to_normal(norm_array)
+                return np.nan_to_num(norm_array,  nan=0.0)
 
             max_workers = getattr(ppo_config, "reward_num_workers", None)
             if max_workers is None:
@@ -1079,67 +1091,194 @@ class LigandPocketDDPM(pl.LightningModule):
                 # rewards_list.append(reward_dict['rew'])  # Example: add diversity bonus
                 for key, value in reward_dict.items():
                     properties_dict[key].append(value)
-            list_qed = properties_dict['qed']
-            list_sa = properties_dict['sa']
-            list_docking = properties_dict['docking_score']
-            list_valid = properties_dict['valid']
-            list_distance = _compute_fps_distances(results)
+            valid_array = np.array(properties_dict['valid'], dtype=bool)
+            distance_array = _compute_fps_distances(results) # compute diversity based on fingerprint distances
+            mean_distance = np.mean(distance_array[valid_array]) if np.sum(valid_array) > 0 else 0.0
+            norm_distance = _postprocess(distance_array, valid_array)
+
+            if 'qed' in properties_dict:
+                qed_array = np.array(properties_dict['qed'])
+                norm_qed = _postprocess(qed_array, valid_array)
+                # norm_qed = utils.rank01_masked(qed_array, valid_array, rescale=False)
+                # norm_qed = utils.minmax_normalize_masked(qed_array, valid_array)
+                # norm_qed = utils.pct_to_normal(norm_qed)
+                # norm_qed = np.nan_to_num(norm_qed,  nan=0.0)
+            if 'sa' in properties_dict:
+                sa_array = np.array(properties_dict['sa'])
+                norm_sa = _postprocess(sa_array, valid_array)
+                # norm_sa = utils.rank01_masked(sa_array, valid_array, rescale=False)
+                # norm_sa = utils.minmax_normalize_masked(sa_array, valid_array)
+                # norm_sa = utils.pct_to_normal(norm_sa)
+                # norm_sa = np.nan_to_num(norm_sa,  nan=0.0)
+            if 'vina_score' in properties_dict:
+                vina_score_array = np.array(properties_dict['vina_score'])
+                norm_vina_score = _postprocess(vina_score_array, valid_array)
+                # norm_vina_score = utils.rank01_masked(vina_score_array, valid_array, rescale=False)
+                # norm_vina_score = utils.minmax_normalize_masked(vina_score_array, valid_array)
+                # norm_vina_score = utils.pct_to_normal(norm_vina_score)
+                # norm_vina_score = np.nan_to_num(norm_vina_score,  nan=0.0)
+            if 'vina_dock' in properties_dict:
+                vina_dock_array = np.array(properties_dict['vina_dock'])
+                norm_vina_dock = _postprocess(vina_dock_array, valid_array)
+                # norm_vina_dock = utils.rank01_masked(vina_dock_array, valid_array, rescale=False)
+                # norm_vina_dock = utils.minmax_normalize_masked(vina_dock_array, valid_array)
+                # norm_vina_dock = utils.pct_to_normal(norm_vina_dock)
+                # norm_vina_dock = np.nan_to_num(norm_vina_dock,  nan=0.0)
+            
+            combined = norm_qed * 0.27 + norm_sa * 0.13 + norm_vina_score * 0.3 + norm_distance * 0.3
+
+            # -------A more flexible way to handle multiple properties--------
+            # property_arrays = {}
+            # norm_properties = {}
+            # for prop_name, values in properties_dict.items():
+            #     if prop_name == 'valid':
+            #         continue
+            #     prop_array = np.array(values)
+            #     property_arrays[prop_name] = prop_array
+            #     norm_properties[prop_name] = _postprocess(prop_array, valid_array, mode='rank')
+
+            # def _get_or_zeros(source_dict, key):
+            #     value = source_dict.get(key)
+            #     if value is None:
+            #         return np.zeros(len(valid_array), dtype=np.float32)
+            #     return value
+
+            # # norm_qed = _get_or_zeros(norm_properties, 'qed')
+            # # norm_sa = _get_or_zeros(norm_properties, 'sa')
+            # # norm_vina_score = _get_or_zeros(norm_properties, 'vina_score')
+            # # norm_vina_dock = _get_or_zeros(norm_properties, 'vina_dock')
+
+            # combined = np.zeros(len(valid_array), dtype=np.float32)
+            # if norm_properties.get('qed') is not None:
+            #     qed_weight = ppo_config.property_weights['qed']
+            #     combined += norm_properties['qed'] * qed_weight
+            # if norm_properties.get('sa') is not None:
+            #     sa_weight = ppo_config.property_weights['sa']
+            #     combined += norm_properties['sa'] * sa_weight
+            # if norm_properties.get('vina_score') is not None:
+            #     vina_score_weight = ppo_config.property_weights['vina_score']
+            #     combined += norm_properties['vina_score'] * vina_score_weight
+            # if norm_properties.get('vina_dock') is not None:
+            #     vina_dock_weight = ppo_config.property_weights['vina_dock']
+            #     combined += norm_properties['vina_dock'] * vina_dock_weight
+            # if ppo_config.property_weights['diversity'] is not None:
+            #     diversity_weight = ppo_config.property_weights['diversity']
+            #     combined += norm_distance * diversity_weight
+            # ---------------------------------------------------------------
+
+
+            # qed_array[valid_array] = np.minimum(qed_array[valid_array], 0.6)  # cap max qed to avoid dominating the reward
+            # sa_array[valid_array] = np.minimum(sa_array[valid_array], 0.9)  # cap max sa to avoid dominating the reward
+            # distance_array[valid_array] = np.minimum(distance_array[valid_array], 0.9)  # cap max distance to avoid dominating the reward
 
             # list of penalty for sa if lower than 0.5, else 0, leave invalids ignored
-            list_sa_penalty = list(list_sa)  # make a copy
-            for i in range(len(list_sa)):
-                if list_valid[i] == 0:
-                    continue
-                if list_sa[i] < 0.7:
-                    list_sa_penalty[i] = list_sa[i] - 0.7  # negative penalty
-                else:
-                    list_sa_penalty[i] = 0.0
+            # sa_penalty_array = np.array(sa_array)  # make a copy
+            # valid_mask = valid_array == 1
+            # low_sa_mask = (sa_array < 0.7) & valid_mask
+            # sa_penalty_array[valid_mask] = 0.0
+            # sa_penalty_array[low_sa_mask] = sa_array[low_sa_mask] - 0.7
 
             # Compute ranks for each property, range (0,1)
-            norm_qed = utils.rank01_masked(list_qed, list_valid, rescale=False)
-            norm_sa = utils.rank01_masked(list_sa, list_valid, rescale=False)
-            # norm_sa = utils.rank01_masked(list_sa_penalty, list_valid, rescale=False)
-            norm_docking = utils.rank01_masked(list_docking, list_valid, rescale=False)
-            norm_distance = utils.rank01_masked(list_distance, list_valid, rescale=False)
 
+            
+            # norm_qed = utils.rank01_masked(qed_array, valid_array, rescale=False)
+            # norm_sa = utils.rank01_masked(sa_array, valid_array, rescale=False)
+            # norm_sa = utils.rank01_masked(list_sa_penalty, list_valid, rescale=False)
+            # norm_vina_score = utils.rank01_masked(vina_score_array, valid_array, rescale=False)
+            # norm_vina_dock = utils.rank01_masked(vina_dock_array, valid_array, rescale=False)
+            # norm_distance = utils.rank01_masked(distance_array, valid_array, rescale=False)
             # norm_qed = utils.percentile_rank_masked(list_qed, list_valid, rescale=False)
             # # norm_sa = utils.percentile_rank_masked(list_sa, list_valid, rescale=False)
             # norm_sa = utils.percentile_rank_masked(list_sa_penalty, list_valid, rescale=False)
             # norm_docking = utils.percentile_rank_masked(list_docking, list_valid, rescale=False)
 
+            # minmax normalize to (0,1) 
+            # norm_qed = utils.minmax_normalize_masked(qed_array, valid_array)
+            # norm_sa = utils.minmax_normalize_masked(sa_array, valid_array)
+            # norm_docking = utils.minmax_normalize_masked(docking_array, valid_array)
+            # norm_distance = utils.minmax_normalize_masked(distance_array, valid_array)
+
             # Map to N(0,1); “rank-to-normal” transform or “quantile normalization.”
-            norm_qed = utils.pct_to_normal(norm_qed)
-            norm_sa = utils.pct_to_normal(norm_sa)
-            norm_docking = utils.pct_to_normal(norm_docking)
-            norm_distance = utils.pct_to_normal(norm_distance)
+            # norm_qed = utils.pct_to_normal(norm_qed)
+            # norm_sa = utils.pct_to_normal(norm_sa)
+            # norm_vina_score = utils.pct_to_normal(norm_vina_score)
+            # norm_vina_dock = utils.pct_to_normal(norm_vina_dock)
+            # norm_distance = utils.pct_to_normal(norm_distance)
+
+            # norm_qed = _postprocess(qed_array, valid_array, mode='rank') if qed_array is not None else None
+            # norm_sa = _postprocess(sa_array, valid_array, mode='rank') if sa_array is not None else None
+            # norm_vina_score = _postprocess(vina_score_array, valid_array, mode='rank') if vina_score_array is not None else None
+            # norm_vina_dock = _postprocess(vina_dock_array, valid_array, mode='rank') if vina_dock_array is not None else None
+            # norm_distance = _postprocess(distance_array, valid_array, mode='rank') if distance_array is not None else None
 
             # Combine valid scores
-            combined = np.zeros(len(results), np.float32)
-            valid_idx = np.where(list_valid)[0]
-            if valid_idx.size > 0:
-                norm_qed = np.nan_to_num(norm_qed,  nan=0.0)
-                norm_sa = np.nan_to_num(norm_sa,   nan=0.0)
-                norm_docking = np.nan_to_num(norm_docking, nan=0.0)
-                norm_distance = np.nan_to_num(norm_distance, nan=0.0)
-                combined = norm_qed * 0.3 + norm_sa * 0.1 + norm_docking * 0.35 + norm_distance * 0.25 
+            # norm_qed = np.nan_to_num(norm_qed,  nan=0.0) if norm_qed is not None else None
+            # norm_sa = np.nan_to_num(norm_sa,   nan=0.0) if norm_sa is not None else None
+            # norm_vina_score = np.nan_to_num(norm_vina_score, nan=0.0) if norm_vina_score is not None else None
+            # norm_vina_dock = np.nan_to_num(norm_vina_dock, nan=0.0) if norm_vina_dock is not None else None
+            # norm_distance = np.nan_to_num(norm_distance, nan=0.0) if norm_distance is not None else None
+            # check if norm_qed is not all-zero array
+
+            # combined = norm_qed * 0.3 + norm_sa * 0.1 + norm_vina_score * 0.3 + norm_distance * 0.3
+            # combined = norm_qed * 0.28 + norm_sa * 0.17 + norm_vina_score * 0.3 + norm_distance * 0.25 
+            # if norm_gap_vina_score_dock is not None:
+            #     combined += (-1.0) * norm_gap_vina_score_dock * 0.1  # penalize large gap between vina score and docking score
+            # valid_idx = np.where(valid_array)[0]
+            # if valid_idx.size > 0:
+            #     norm_qed = np.nan_to_num(norm_qed,  nan=0.0)
+            #     norm_sa = np.nan_to_num(norm_sa,   nan=0.0)
+            #     norm_vina_score = np.nan_to_num(norm_vina_score, nan=0.0)
+            #     norm_vina_dock = np.nan_to_num(norm_vina_dock, nan=0.0)
+            #     norm_distance = np.nan_to_num(norm_distance, nan=0.0)
+            #     combined = norm_qed * 0.3 + norm_sa * 0.1 + norm_vina_score * 0.35 + norm_distance * 0.25 
+                # combined = norm_qed * 0.33 + norm_sa * 0.1 + norm_vina_score * 0.35 + norm_distance * 0.22 
+                # combined = qed_array * 0.3 + sa_array * 0.1 + norm_vina_score * 0.3 + distance_array * 0.3
             
             # Assign fixed penalty to invalids
             FIXED_INVALID_PENALTY = -3.09 # norm.ppf(1e-3) ≈ -3.09
             # FIXED_INVALID_PENALTY = -1.0 + 1e-4
-            combined[~np.asarray(list_valid, bool)] = FIXED_INVALID_PENALTY
+
+            # handle invalid samples by assigning them a score of (mean - 5*std)
+            valid_scores = combined[valid_array]
+            mu, sigma = valid_scores.mean(), valid_scores.std() + 1e-8
+            combined[~valid_array] = mu - 3.0 * sigma  # assign invalids to be 3 std below mean
+            # combined[~valid_array] = FIXED_INVALID_PENALTY
 
             # combined = np.array(list_qed) * 0.8 + np.array(list_sa) * 0.2 + np.array(list_docking) * 0.1
-            # combined[~np.asarray(list_valid, bool)] = -1.0
+            # combined[~valid_array] = -0.1
+
+            # Prepare sample records
+            for idx, (mol, reward_dict) in enumerate(results):
+                if mol is None:
+                    continue
+                sample_records.append({
+                    "mol": mol,
+                    "metrics": {
+                        "qed": float(reward_dict.get("qed", 0.0)),
+                        "sa": float(reward_dict.get("sa", 0.0)),
+                        "vina_score": float(reward_dict.get("vina_score", 0.0)),
+                        "vina_dock": float(reward_dict.get("vina_dock", 0.0)),
+                        "distance": float(distance_array[idx]),
+                        "num_atoms": int(mol.GetNumAtoms()),
+                    }
+                })
 
             rewards = torch.tensor(combined, device=self.device, dtype=torch.float32)
             rewards_mean = rewards.mean()
             rewards_std = rewards.std()
             advantages = (rewards - rewards_mean) / (rewards_std + 1e-8)
+
+            # Log episodic metrics for logging, like wandb
             episodic_metrics["combined_rewards"] = rewards_mean.item()
             episodic_metrics["combined_reward_std"] = rewards_std.item()
+            episodic_metrics["valid_combined_mu"] = mu
+            episodic_metrics["valid_combined_std"] = sigma
             episodic_metrics["qed"] = np.mean(properties_dict.get('qed', [0.0]*len(results)))
             episodic_metrics["sa"] = np.mean(properties_dict.get('sa', [0.0]*len(results)))
-            episodic_metrics["docking_score"] = np.mean(properties_dict.get('docking_score', [0.0]*len(results)))
+            episodic_metrics["docking_score"] = np.mean(properties_dict.get('vina_score', [0.0]*len(results)))
+            episodic_metrics["vina_score"] = np.mean(properties_dict.get('vina_score', [0.0]*len(results)))
+            episodic_metrics["vina_dock"] = np.mean(properties_dict.get('vina_dock', [0.0]*len(results)))
+            episodic_metrics["distance"] = mean_distance
             episodic_metrics["valid_rate"] = float(len(molecules)) / float(len(results)) if len(results) > 0 else 0.0
             episodic_metrics["diversity"] = analyze_out['Diversity']
             # episodic_metrics["qed"] = analyze_out['QED']
@@ -1214,22 +1353,24 @@ class LigandPocketDDPM(pl.LightningModule):
                 approx_kl_vals.append(0.5 * torch.mean(logratio ** 2).detach().item())
                 clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach().item())
                 loss_vals.append(loss_i.detach().item())
-                # with torch.no_grad():
-                #     # Also add KL penalty to the pretrained model to prevent
-                #     # catastrophic policy updates
-                #     # Compute log_prob under the pretrained model
-                #     pretrained_out_dict = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
-                #         s_norm_all[i], t_norm_all[i],
-                #         zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
-                #         ligand_mask=lig_mask, pocket_mask=pocket['mask'],
-                #         action=rollout_buffer.action_steps[i], mu_via_x0=True
-                #     ) 
-                #     pretrained_log_prob = pretrained_out_dict['log_prob']
+                # --- KL to pretrained policy ---
+                if hasattr(self, "ddpm_pretrained") and ppo_config.kl_coeff_pretrain > 0:
+                    with torch.no_grad():
+                    #     # Also add KL penalty to the pretrained model to prevent
+                    #     # catastrophic policy updates
+                    #     # Compute log_prob under the pretrained model
+                        pretrained_out_dict = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
+                            s_norm_all[i], t_norm_all[i],
+                            zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                            ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                            action=rollout_buffer.action_steps[i], mu_via_x0=True
+                        )
+                        pretrained_log_prob = pretrained_out_dict['log_prob']
 
-                # # kl divergence loss 
-                # kl_loss = torch.mean(new_log_prob - pretrained_log_prob)
-                # total_loss = total_loss + ppo_config.kl_coef * kl_loss
-
+                    # # kl divergence to the pretrained model 
+                    kl_loss = torch.mean(new_log_prob - pretrained_log_prob)
+                    total_loss = total_loss + ppo_config.kl_coeff_pretrain * kl_loss
+                # -------------------------------
                 optimizer.zero_grad()
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.ddpm.dynamics.parameters(),
@@ -1244,7 +1385,7 @@ class LigandPocketDDPM(pl.LightningModule):
             "loss": float(np.mean(loss_vals)),
         })
 
-        return episodic_metrics, molecules
+        return episodic_metrics, sample_records
 
     def configure_gradient_clipping(self, optimizer,
                                     gradient_clip_val, gradient_clip_algorithm):
