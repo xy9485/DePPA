@@ -999,8 +999,18 @@ class LigandPocketDDPM(pl.LightningModule):
             def _compute_reward(mol_pc, reward_fn_dict, add_hydrogens, sanitize, relax_iter, largest_frag):
                 # create a reward_dict based on keys in reward_fn_dict
                 reward_dict = {'valid': 0} # valid indicates check_molecule_connectivity and sanitization check
-                for key in reward_fn_dict:
-                    reward_dict[key] = 0.0
+                # for key in reward_fn_dict:
+                #     reward_dict[key] = 0.0
+                reward_dict['qed'] = 0.0  # default qed to 0.0
+                reward_dict['sa'] = 0.0  # default sa to 0.0
+                reward_dict['vina_score'] = 0.0  # default vina_score to 0.0
+                reward_dict['vina_dock'] = 0.0  #
+                reward_dict['strain'] = 0.0  # default strain energy to 0.0
+                reward_dict['clash'] = 0.0  # default clash to 0.0
+                reward_dict['hb_donor'] = 0.0  # default hb_donor to 0.0
+                reward_dict['hb_acceptor'] = 0.0  # default hb_acceptor to 0.0
+                reward_dict['vdw'] = 0.0  # default vdw to 0.0
+                reward_dict['hydrophobic'] = 0.0  # default hydrophobic to 0.0
                 mol = build_molecule(*mol_pc, self.dataset_info, add_coords=True)
 
                 # identify if there are isolated atoms
@@ -1021,26 +1031,30 @@ class LigandPocketDDPM(pl.LightningModule):
                 if not largest_frag:
                     mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True)
                     largest_mol = max(mol_frags, default=mol, key=lambda m: m.GetNumAtoms())
-                    if mol.GetNumAtoms() / n_mol_atoms < self.ligand_metrics.connectivity_thresh:
+                    if largest_mol.GetNumAtoms() / n_mol_atoms < self.ligand_metrics.connectivity_thresh:
                         return None, reward_dict
 
                   # to ensure molecule is processed
                 # r = ppo_config.reward_fn(mol)
-                reward_dict['valid'] = 1
-                if 'qed' in reward_fn_dict:
-                    reward_dict['qed'] = reward_fn_dict['qed'](mol)
-
-                if 'sa' in reward_fn_dict:
-                    reward_dict['sa'] = reward_fn_dict['sa'](mol)
                 if 'vina_score' in reward_fn_dict:
-                    reward_dict['vina_score'] = reward_fn_dict['vina_score'](mol)
+                    vina_score = reward_fn_dict['vina_score'](mol)
+                    if np.isnan(vina_score):
+                        return None, reward_dict
+                    reward_dict['vina_score'] = vina_score
                 if 'vina_dock' in reward_fn_dict:
                     reward_dict['vina_dock'] = reward_fn_dict['vina_dock'](mol)
+                if 'qed' in reward_fn_dict:
+                    reward_dict['qed'] = reward_fn_dict['qed'](mol)
+                if 'sa' in reward_fn_dict:
+                    reward_dict['sa'] = reward_fn_dict['sa'](mol)
+                if 'posecheck' in reward_fn_dict:
+                    pose_check_results = reward_fn_dict['posecheck'](mol)
+                    reward_dict.update(pose_check_results)
 
                 # if isinstance(r, (tuple, list)):
                 #     r = r[0]
                 # if r is None or not np.isfinite(r):
-                #     r = float(np.random.uniform(-0.1, 0.0))
+                reward_dict['valid'] = 1
                 return mol, reward_dict
 
             def _compute_fps_distances(results):
@@ -1096,6 +1110,23 @@ class LigandPocketDDPM(pl.LightningModule):
             mean_distance = np.mean(distance_array[valid_array]) if np.sum(valid_array) > 0 else 0.0
             norm_distance = _postprocess(distance_array, valid_array)
 
+            # -------------------eval posecheck for all molecules-------------------
+            # pose_check_results = ppo_config.reward_fn_dict['posecheck'](molecules)
+            # # length of molecules is smaller than that of results,
+            # # take properties_dict['valid'] into consideration，insert 0.0 for invalid molecules
+            # updated_pose_check_results = defaultdict(list)
+            # mol_idx = 0
+            # for is_valid in properties_dict['valid']:
+            #     if is_valid:
+            #         for key, value in pose_check_results.items():
+            #             updated_pose_check_results[key].append(value[mol_idx])
+            #         mol_idx += 1
+            #     else:
+            #         for key in pose_check_results.keys():
+            #             updated_pose_check_results[key].append(0.0)
+            # pose_check_results = updated_pose_check_results
+            # ----------------------------------------------------------------------
+
             if 'qed' in properties_dict:
                 qed_array = np.array(properties_dict['qed'])
                 norm_qed = _postprocess(qed_array, valid_array)
@@ -1124,9 +1155,20 @@ class LigandPocketDDPM(pl.LightningModule):
                 # norm_vina_dock = utils.minmax_normalize_masked(vina_dock_array, valid_array)
                 # norm_vina_dock = utils.pct_to_normal(norm_vina_dock)
                 # norm_vina_dock = np.nan_to_num(norm_vina_dock,  nan=0.0)
-            
-            combined = norm_qed * 0.27 + norm_sa * 0.13 + norm_vina_score * 0.3 + norm_distance * 0.3
-
+            if 'strain' in properties_dict:
+                strain_array = np.array(properties_dict['strain'])
+                norm_strain = _postprocess(strain_array, valid_array)
+            if 'clash' in properties_dict:
+                clash_array = np.array(properties_dict['clash'])
+                norm_clash = _postprocess(clash_array, valid_array)
+            # combined = norm_qed * 0.27 + norm_sa * 0.13 + norm_vina_score * 0.3 + norm_distance * 0.3
+            # combined = norm_qed * 0.3 + norm_sa * 0.15 + norm_vina_score * 0.3 + norm_distance * 0.25 # minmax
+            # combined = norm_qed * 0.3 + norm_sa * 0.3 + norm_vina_score * 0.4 + norm_distance * 0.0 # with kl coeff
+            w_qed = ppo_config.reward_weights['qed']
+            w_sa = ppo_config.reward_weights['sa']
+            w_vina_score = ppo_config.reward_weights['vina_score']
+            w_distance = ppo_config.reward_weights['distance']
+            combined = norm_qed * w_qed + norm_sa * w_sa + norm_vina_score * w_vina_score + norm_distance * w_distance
             # -------A more flexible way to handle multiple properties--------
             # property_arrays = {}
             # norm_properties = {}
@@ -1260,6 +1302,8 @@ class LigandPocketDDPM(pl.LightningModule):
                         "vina_dock": float(reward_dict.get("vina_dock", 0.0)),
                         "distance": float(distance_array[idx]),
                         "num_atoms": int(mol.GetNumAtoms()),
+                        "strain": float(reward_dict.get("strain", 0.0)),
+                        "clash": float(reward_dict.get("clash", 0.0)),
                     }
                 })
 
@@ -1278,9 +1322,12 @@ class LigandPocketDDPM(pl.LightningModule):
             episodic_metrics["docking_score"] = np.mean(properties_dict.get('vina_score', [0.0]*len(results)))
             episodic_metrics["vina_score"] = np.mean(properties_dict.get('vina_score', [0.0]*len(results)))
             episodic_metrics["vina_dock"] = np.mean(properties_dict.get('vina_dock', [0.0]*len(results)))
+            episodic_metrics["strain"] = np.mean(properties_dict.get('strain', [0.0]*len(results)))
+            episodic_metrics["clash"] = np.mean(properties_dict.get('clash', [0.0]*len(results)))
             episodic_metrics["distance"] = mean_distance
             episodic_metrics["valid_rate"] = float(len(molecules)) / float(len(results)) if len(results) > 0 else 0.0
             episodic_metrics["diversity"] = analyze_out['Diversity']
+            episodic_metrics["mean_size"] = sum([mol.GetNumAtoms() for mol in molecules]) / len(molecules) if len(molecules) > 0 else 0.0
             # episodic_metrics["qed"] = analyze_out['QED']
             # episodic_metrics["sa"] = analyze_out['SA']
             # episodic_metrics["logp"] = analyze_out['LogP']
@@ -1304,6 +1351,7 @@ class LigandPocketDDPM(pl.LightningModule):
         
         # dict_ligsize_reward = {str(sz): rw for sz, rw in zip(num_nodes_lig.tolist(), rewards_list)}
         # print(f"Rollout ligand sizes and rewards: {dict_ligsize_reward} ")
+        print("pdb_file:", pdb_file)
         print("Episodic metrics:", episodic_metrics)
         print(f"Rollout combined rewards mean: {rewards.mean().item()}, std: {rewards.std().item()}")
 
@@ -1327,55 +1375,80 @@ class LigandPocketDDPM(pl.LightningModule):
 
             for i in indices:
                 # Recompute log_prob under current policy for PPO ratio
-                out_dict = self.ddpm.sample_p_zs_given_zt_rl(
-                    s_norm_all[i], t_norm_all[i],
-                    zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
-                    ligand_mask=lig_mask, pocket_mask=pocket['mask'],
-                    action=rollout_buffer.action_steps[i], mu_via_x0=True
-                )
-                new_log_prob = out_dict['log_prob']        # (n_samples,)
-                old_log_prob = rollout_buffer.log_prob_steps[i] 
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    out_dict = self.ddpm.sample_p_zs_given_zt_rl(
+                        s_norm_all[i], t_norm_all[i],
+                        zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                        ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                        action=rollout_buffer.action_steps[i], mu_via_x0=True
+                    )
+                    new_log_prob = out_dict['log_prob']        # (n_samples,)
+                    old_log_prob = rollout_buffer.log_prob_steps[i] 
+                    # is num_nodes_lig contains zeros, then corresponding log_prob would be nan, need to filter them out
+                    new_log_prob = new_log_prob[~new_log_prob.isnan()]
+                    old_log_prob = old_log_prob[~old_log_prob.isnan()]
 
-                logratio = new_log_prob - old_log_prob
-                ratio = torch.exp(logratio)
+                    logratio = new_log_prob - old_log_prob
+                    ratio = torch.exp(logratio)
 
-                # Optionally clip advantages if desired (not provided here)
-                unclipped = -advantages * ratio
-                clipped = -advantages * torch.clamp(
-                    ratio,
-                    1.0 - ppo_config.clip_range,
-                    1.0 + ppo_config.clip_range,
-                )
-                total_loss = 0.0
-                loss_i = torch.mean(torch.maximum(unclipped, clipped))
-                total_loss = total_loss + loss_i
-                # Diagnostics similar to ddpo
-                approx_kl_vals.append(0.5 * torch.mean(logratio ** 2).detach().item())
-                clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach().item())
-                loss_vals.append(loss_i.detach().item())
-                # --- KL to pretrained policy ---
-                if hasattr(self, "ddpm_pretrained") and ppo_config.kl_coeff_pretrain > 0:
-                    with torch.no_grad():
-                    #     # Also add KL penalty to the pretrained model to prevent
-                    #     # catastrophic policy updates
-                    #     # Compute log_prob under the pretrained model
-                        pretrained_out_dict = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
-                            s_norm_all[i], t_norm_all[i],
-                            zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
-                            ligand_mask=lig_mask, pocket_mask=pocket['mask'],
-                            action=rollout_buffer.action_steps[i], mu_via_x0=True
-                        )
-                        pretrained_log_prob = pretrained_out_dict['log_prob']
+                    # Optionally clip advantages if desired (not provided here)
+                    unclipped = -advantages * ratio
+                    clipped = -advantages * torch.clamp(
+                        ratio,
+                        1.0 - ppo_config.clip_range,
+                        1.0 + ppo_config.clip_range,
+                    )
+                    total_loss = 0.0
+                    loss_i = torch.mean(torch.maximum(unclipped, clipped))
+                    total_loss = total_loss + loss_i
+                    # Diagnostics similar to ddpo
+                    approx_kl_vals.append(0.5 * torch.mean(logratio ** 2).detach().item())
+                    clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach().item())
+                    loss_vals.append(loss_i.detach().item())
+                    # --- KL to pretrained policy ---
+                    if hasattr(self, "ddpm_pretrained") and ppo_config.kl_coeff_pretrain > 0:
+                        with torch.no_grad():
+                        #     # Also add KL penalty to the pretrained model to prevent
+                        #     # catastrophic policy updates
+                        #     # Compute log_prob under the pretrained model
+                            pretrained_out_dict = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
+                                s_norm_all[i], t_norm_all[i],
+                                zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                                ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                                action=rollout_buffer.action_steps[i], mu_via_x0=True
+                            )
+                            pretrained_log_prob = pretrained_out_dict['log_prob']
+                        pretrained_log_prob = pretrained_log_prob[~pretrained_log_prob.isnan()]
+                        new_log_prob = new_log_prob[~new_log_prob.isnan()]
+                        # # kl divergence to the pretrained model 
+                        logratio_ref_theta = pretrained_log_prob - new_log_prob
+                        ratio_ref_theta = torch.exp(logratio_ref_theta)
+                        # calculate approx_kl http://joschu.net/blog/kl-approx.html
+                        approx_kl = (ratio_ref_theta - 1 - logratio_ref_theta)
 
-                    # # kl divergence to the pretrained model 
-                    kl_loss = torch.mean(new_log_prob - pretrained_log_prob)
-                    total_loss = total_loss + ppo_config.kl_coeff_pretrain * kl_loss
+                        # without importance sampling weights
+                        kl_loss = approx_kl.mean()
+                        # with importance sampling weights
+                        importance_sampling_weights = ratio
+                        # kl_loss = (importance_sampling_weights * approx_kl).mean()
+                        
+                        # kl_loss = torch.mean(new_log_prob - pretrained_log_prob)
+                        total_loss = total_loss + ppo_config.kl_coeff_pretrain * kl_loss
                 # -------------------------------
                 optimizer.zero_grad()
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.ddpm.dynamics.parameters(),
                                                 max_norm=1.0)
                 optimizer.step()
+
+                # [when using scaler = torch.amp.GradScaler()]
+                # optimizer.zero_grad()
+                # scaler.scale(total_loss).backward()
+                # scaler.unscale_(optimizer)
+                # torch.nn.utils.clip_grad_norm_(self.ddpm.dynamics.parameters(),
+                #                                 max_norm=1.0)
+                # scaler.step(optimizer)
+                # scaler.update()
 
         # metrics = {"rewards": rewards.mean().item()}
 

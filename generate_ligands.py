@@ -11,12 +11,15 @@ import copy
 import utils
 from lightning_modules import LigandPocketDDPM
 from Bio.PDB import PDBParser
+import posecheck
 
 import numpy as np
 from rdkit import Chem
 from functools import partial
-import AutoDockTools
+# import AutoDockTools
 import subprocess
+# import warnings
+# warnings.simplefilter("error", DeprecationWarning)
 import os
 if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
     import debugpy
@@ -36,7 +39,7 @@ if __name__ == "__main__":
     parser.add_argument('--outfile', type=Path)
     parser.add_argument('--n_samples', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=None)
-    parser.add_argument('--num_nodes_lig', type=int, default=None)
+    parser.add_argument('--mode_num_nodes_lig', choices=('align_reference_ligand', 'sample'), default=None, help="Control ligand node count: keeping the same size with the reference ligand or sample conditioned on pocket size.")
     parser.add_argument('--all_frags', action='store_true')
     parser.add_argument('--sanitize', action='store_true')
     parser.add_argument('--relax', action='store_true')
@@ -74,11 +77,12 @@ if __name__ == "__main__":
     ligand_size = ligand_coords.shape[0]
     print(f"Reference ligand has {ligand_size} atoms.")
 
-    if args.num_nodes_lig is not None:
-        num_nodes_lig = args.num_nodes_lig
-    else:
+    if args.mode_num_nodes_lig == 'align_reference_ligand':
         num_nodes_lig = torch.ones(args.n_samples, dtype=int) * ligand_size
-        # num_nodes_lig = None
+        # num_nodes_lig = args.num_nodes_lig
+    elif args.mode_num_nodes_lig == 'sample' or args.mode_num_nodes_lig is None:
+        # num_nodes_lig = None leads to sampling num nodes conditioned on pocket size
+        num_nodes_lig = None
     # RL 
 
     # prepare_receptor = os.path.join(AutoDockTools.__path__[0], 'Utilities24/prepare_receptor4.py')
@@ -116,6 +120,12 @@ if __name__ == "__main__":
         #                   use_meeko=False,
         #                   score_only=False
         #                   ),  
+        # 'posecheck': partial(model.molecule_properties.pose_check,
+        #                      posecheck_protein=posecheck.utils.loading.load_protein_from_pdb(args.pdbfile),
+        #                      compute_strain=True,
+        #                      compute_clash=True,
+        #                      compute_interactions=False
+        #                      ),
     }
     ppo_config = SimpleNamespace(
         clip_range=0.2,
@@ -136,12 +146,18 @@ if __name__ == "__main__":
         #                   ),
         reward_fn_dict=reward_fn_dict,
         kl_coeff_pretrain=0.0,
+        reward_weights={
+                "qed": 0.27,
+                "sa": 0.13,
+                "vina_score": 0.3,
+                "distance": 0.3,
+            },
     )
     wandb.init(
         project="DiffSBDD-PPO",
         mode="offline",
         group="DiffSBDD-" +pdb_id,
-        name="ii10_NormRank_Penalty-3std_QED0.27_SA0.13_Vina0.3_Distance0.3_KL0.0_"+pdb_id,
+        name="ii10_ligSizeRef_NormRank_Penalty-3std_strain_clash_QED0.3_SA0.3_Vina0.4_Distance0.0_KL0.0_"+pdb_id,
         config=vars(ppo_config),
     )
     wandb_logger = LoggerWandb()

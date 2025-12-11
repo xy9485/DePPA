@@ -7,9 +7,10 @@ slurm_files
 wandb
 *.ckpt
 *.pdbqt
-*.sh
+
 *.json
 crossdocked_test
 rl_batch_generate_outputs*
 example2
 analysis/qvina2_temp_output/*
+rl_batch*
