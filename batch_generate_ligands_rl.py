@@ -30,7 +30,7 @@ if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
 
 openbabel.obErrorLog.StopLogging()  # quiet OpenBabel output
 
-METRIC_FIELDS = ["num_atoms", "qed", "sa", "distance", "vina_score", "vina_dock", "strain", "clash", "weighted_sum"]
+METRIC_FIELDS = ["num_atoms", "qed", "sa", "distance", "vina_score", "vina_min", "vina_dock", "strain", "clash", "connectivity", "sc_rmsd"]
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -79,6 +79,7 @@ def parse_args():
         ),
     )
     parser.add_argument("--wandb_mode", type=str, choices=("online", "offline", "disabled"), default="online", help="wandb mode.")
+    parser.add_argument("--group_name_suffix", type=str, default="", help="Suffix to append to the wandb group name.")
     return parser.parse_args()
 
 
@@ -145,10 +146,7 @@ def load_reference_ligand(ref_ligand: Path, pdb_file: Path):
     return coords, coords.mean(axis=0), coords.shape[0]
 
 
-def score_sort_records(records):
-    if not records:
-        return []
-
+def compute_diversity(records):
     fps = [Chem.RDKFingerprint(rec["mol"]) for rec in records]
     distances = []
     for i, fp in enumerate(fps):
@@ -158,28 +156,86 @@ def score_sort_records(records):
             if j != i
         ]
         distances.append(0.0 if not sims else 1.0 - float(np.mean(sims)))
-
-    def safe_value(val, default=-1e9):
-        try:
-            num = float(val)
-        except (TypeError, ValueError):
-            return default
-        if math.isnan(num) or math.isinf(num):
-            return default
-        return num
-
-    for rec, dist in zip(records, distances):
-        metrics = rec["metrics"]
-        metrics["distance"] = dist
-        qed = safe_value(metrics.get("qed"))
-        sa = safe_value(metrics.get("sa"))
-        vina_score = safe_value(metrics.get("vina_score"))
-        metrics["weighted_sum"] = 0.27 * qed + 0.13 * sa + 0.3 * dist + 0.3 * vina_score
-
-    return sorted(records, key=lambda r: r["metrics"].get("weighted_sum", -1e9), reverse=True)
+    return distances
 
 
-def save_records(records, out_dir: Path, label: str):
+def safe_float(value):
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        value = value.item()
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(num) or math.isinf(num):
+        return None
+    return num
+
+
+def compute_normalization_stats_from_records(records, field_name):
+    values = []
+    for idx, rec in enumerate(records, start=1):
+        metrics = rec.get("metrics", {})
+        value = safe_float(metrics.get(field_name))
+        if value is None:
+            raise ValueError(
+                f"Missing or invalid '{field_name}' metric in record {idx}."
+            )
+        values.append(value)
+    if not values:
+        raise ValueError(f"No numeric values for '{field_name}'.")
+    mean = float(sum(values) / len(values))
+    variance = float(sum((v - mean) ** 2 for v in values) / len(values))
+    std = math.sqrt(variance)
+    if std == 0:
+        raise ValueError(
+            f"Standard deviation for '{field_name}' is zero; cannot normalize."
+        )
+    return mean, std
+
+
+def sort_records_by_zscore(records, weights):
+    """Sort records via z-scored weighted sum, mirroring rerank_summarize_results."""
+    if not records:
+        return []
+
+    stats = {
+        field: compute_normalization_stats_from_records(records, field)
+        for field in weights
+    }
+
+    for rec in records:
+        score = 0.0
+        metrics = rec.get("metrics", {})
+        for field, weight in weights.items():
+            value = safe_float(metrics.get(field))
+            if value is None:
+                raise ValueError(
+                    f"Missing '{field}' metric while computing rerank z-score."
+                )
+            mean, std = stats[field]
+            normalized = (value - mean) / std
+            score += weight * normalized
+        metrics["z_score_weighted_sum"] = score
+
+    return sorted(
+        records,
+        key=lambda rec: rec["metrics"].get("z_score_weighted_sum", 0.0),
+        reverse=True,
+    )
+
+
+def weighted_score(rec, weights):
+    metrics = rec["metrics"]
+    weighted_score = 0.0
+    for key, weight in weights.items():
+        value = metrics[key]
+        weighted_score += weight * value
+    return weighted_score
+
+
+def save_records(records, out_dir: Path, label: str,):
     if not records:
         return
 
@@ -197,15 +253,28 @@ def save_records(records, out_dir: Path, label: str):
     # else:
     #     per_record_dir.mkdir()
 
-    csv_path = out_dir / f"{label}_scores.csv"
+    csv_path = out_dir / f"{label}.csv"
+    # [using csv.writer]
+    # csv_fields = list(records[0]["metrics"].keys())
+    # with open(csv_path, "w", newline="") as handle:
+    #     writer = csv.writer(handle)
+    #     writer.writerow(["rank"] + csv_fields)
+    #     for idx, rec in enumerate(records):
+    #         m = rec["metrics"]
+    #         writer.writerow([
+    #             idx + 1,
+    #         ] + [m.get(field) for field in csv_fields])
+
+    # [using csv.Dictwriter instead of csv.writer]
+    csv_fields = list(records[0]["metrics"].keys())
+    csv_fields = ['rank',] + csv_fields
     with open(csv_path, "w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["rank"] + METRIC_FIELDS)
+        csv_writer = csv.DictWriter(handle, fieldnames=csv_fields, extrasaction="ignore")
+        csv_writer.writeheader()
         for idx, rec in enumerate(records):
-            m = rec["metrics"]
-            writer.writerow([
-                idx + 1,
-            ] + [m.get(field) for field in METRIC_FIELDS])
+            row_dict = {"rank": idx + 1}
+            row_dict.update(rec["metrics"])
+            csv_writer.writerow(row_dict)
 
             # mol = rec.get("mol")
             # if mol is None:
@@ -216,6 +285,7 @@ def save_records(records, out_dir: Path, label: str):
             #     mol.SetProp(str(key), str(value))
             # per_record_sdf = per_record_dir / f"rank_{idx + 1:03d}.sdf"
             # utils.write_sdf_file(per_record_sdf, [mol])
+    return sdf_path, csv_path
 
 
 def summarize_records(records):
@@ -272,8 +342,22 @@ def main():
                 center_xyz=mean_coord,
                 receptor_pdbqt_file=str(receptor_file),
                 use_meeko=False,
-                score_only=True,
+                vina_mode='vina_score',
             ),
+            # "vina_min": partial(
+            #     model.molecule_properties.calculate_docking_score,
+            #     center_xyz=mean_coord,
+            #     receptor_pdbqt_file=str(receptor_file),
+            #     use_meeko=False,
+            #     vina_mode='vina_min',
+            # ),
+            # "vina_dock": partial(
+            #     model.molecule_properties.calculate_docking_score,
+            #     center_xyz=mean_coord,
+            #     receptor_pdbqt_file=str(receptor_file),
+            #     use_meeko=False,
+            #     vina_mode='vina_dock',
+            # ),
             # "vina_dock": partial(
             #     model.molecule_properties.calculate_docking_score,
             #     center_xyz=mean_coord,
@@ -288,7 +372,13 @@ def main():
             #             compute_interactions=False
             #             ),
         }
-
+        reward_weights={
+                "qed": 0.27,
+                "sa": 0.13,
+                "vina_score": 0.3,
+                "distance": 0.3,
+                # "strain": 0.05
+            }
         ppo_config = SimpleNamespace(
             clip_range=args.clip_range,
             max_grad_norm=args.max_grad_norm,
@@ -299,12 +389,7 @@ def main():
             reward_fn_dict=reward_fn_dict,
             kl_coeff_pretrain=args.kl_coeff_pretrain,
             reward_num_workers=args.reward_workers,
-            reward_weights={
-                "qed": 0.27,
-                "sa": 0.13,
-                "vina_score": 0.3,
-                "distance": 0.3,
-            },
+            reward_weights=reward_weights,
         )
         ppo_config.episode_length = ppo_config.max_time_steps // ppo_config.inference_interval
 
@@ -315,7 +400,9 @@ def main():
                 param.requires_grad_(False)
 
         ligSize = "Ref" if args.mode_num_nodes_lig == 'align_reference_ligand' else "Sample"
-        group_name = f"RLTestset_nRollout_{args.rollouts}_nSample{args.n_samples}_ligSize{ligSize}_allFrags{int(args.all_frags)}_ii{args.inference_interval}_NormRank_Penalty-3std_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Distance{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}"
+        group_name = f"nIter{args.rollouts}_nSample{args.n_samples}_ligSize{ligSize}_allFrags{int(args.all_frags)}_ii{args.inference_interval}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}"
+        group_name += args.group_name_suffix
+        assert len(group_name) <= 128, "WandB group name exceeds 128 characters."
         wandb.init(
             project="DiffSBDD-PPO",
             mode=args.wandb_mode,
@@ -358,47 +445,64 @@ def main():
                 print(f"No molecules generated for {base}, skipping save.")
                 continue
 
+            # distance2 = compute_diversity(all_records)
+            # # distance2 is computed among all_records, distance computed among among one rollout
+            # for rec, dist in zip(all_records, distance2):
+            #     rec["metrics"]["distance2"] = dist
+
             pocket_out = output_dir / base
             save_records(all_records, pocket_out, "raw")
+            
+            # [recording processed results with weighted sum for sorting]
+            # weights_for_sorting = reward_weights.copy()
+            # sorted_records = sorted(
+            #     all_records,
+            #     key=partial(weighted_score, weights=weights_for_sorting),
+            #     reverse=True,
+            # )
 
-            scored_records = score_sort_records(all_records)
-            if not scored_records:
-                print(f"No valid molecules for {base} after scoring, skipping save.")
-                continue
+            # save_records(sorted_records, pocket_out, "sorted")
 
-            save_records(scored_records, pocket_out, "all_sorted")
+            # # score_records2 follows rerank_summarize_results z-scored sorting
+            # zscore_sorted_records = sort_records_by_zscore(all_records, {"vina_score": 5.0, "qed": 1.0, "sa": 1.5})
+            # save_records(zscore_sorted_records, pocket_out, "zscore_sorted")
 
-            top_records = scored_records[:args.top_k]
-            save_records(top_records, pocket_out, f"top_{args.top_k}")
-            print(f"Saved top {len(top_records)} ligands for {base} to {pocket_out}.")
+            # top_records = zscore_sorted_records[:args.top_k]
+            # distance2 = compute_diversity(top_records)
+            # # distance2 is computed among all_records, distance computed among among one rollout
+            # for rec, dist in zip(top_records, distance2):
+            #     rec["metrics"]["distance2"] = dist
+            # save_records(top_records, pocket_out, f"top_{args.top_k}")
+            # print(f"Saved top {len(top_records)} ligands for {base} to {pocket_out}.")
 
-            pocket_summary = summarize_records(top_records)
-            pocket_summary["pocket"] = base
-            pocket_summaries.append(pocket_summary)
+            # pocket_summary = summarize_records(top_records)
+            # pocket_summary["pocket"] = base
+            # pocket_summaries.append(pocket_summary)
         finally:
             wandb.finish()
 
-    if args.summary:
-        summary_path = output_dir / "pocket_summary.csv"
-        # metric_fields = ["num_atoms", "qed", "sa", "distance", "vina_score", "vina_dock", "strain", "clash", "weighted_sum"]
-        with open(summary_path, "w", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["pocket", "count"] + METRIC_FIELDS)
-            for row in pocket_summaries:
-                writer.writerow(
-                    [row["pocket"], row["count"]]
-                    + [row[m] for m in METRIC_FIELDS]
-                )
+    # if args.summary:
+    #     summary_path = output_dir / "pocket_summary.csv"
+    #     # metric_fields = ["num_atoms", "qed", "sa", "distance", "vina_score", "vina_dock", "strain", "clash", "weighted_sum"]
+    #     with open(summary_path, "w", newline="") as handle:
+    #         writer = csv.writer(handle)
+    #         writer.writerow(["pocket", "count"] + METRIC_FIELDS)
+    #         for row in pocket_summaries:
+    #             writer.writerow(
+    #                 [row["pocket"], row["count"]]
+    #                 + [row[m] for m in METRIC_FIELDS]
+    #             )
 
-            # Overall averages across pockets (macro average)
-            overall_row = ["OVERALL", None]
-            for m in METRIC_FIELDS:
-                values = [r[m] for r in pocket_summaries if r[m] is not None]
-                overall_row.append(float(np.mean(values)) if values else None)
-            writer.writerow(overall_row)
+    #         # Overall averages across pockets (macro average)
+    #         overall_row = ["OVERALL", None]
+    #         for m in METRIC_FIELDS:
+    #             values = [r[m] for r in pocket_summaries if r[m] is not None]
+    #             overall_row.append(float(np.mean(values)) if values else None)
+    #         writer.writerow(overall_row)
 
-        print(f"Wrote per-pocket and overall averages to {summary_path}.")
+    #     print(f"Wrote per-pocket and overall averages to {summary_path}.")
 
 
 if __name__ == "__main__":
     main()
+    print("All Done.")

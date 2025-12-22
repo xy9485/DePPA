@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # See `man sbatch` or https://slurm.schedmd.com/sbatch.html for descriptions of sbatch options.
-#SBATCH --job-name=sbdd_rl          # A nice readable name of your job, to see it in the queue
+#SBATCH --job-name=sbdd_rl         # A nice readable name of your job, to see it in the queue
 
-#SBATCH --time=1-00           # Time limit hrs:min:sec
+#SBATCH --time=2-00          # Time limit hrs:min:sec
 #SBATCH --nodes=1                   # Number of nodes to request
 #SBATCH --cpus-per-task=32           # Number of CPUs to request
 #SBATCH --gpus=1                    # Number of GPUs to request
@@ -27,6 +27,7 @@ conda activate diffsbdd
 
 pocket_ranges=("0-25" "25-50" "50-75" "75-100")
 # pocket_ranges=("0-2" "2-4" "4-6" "6-8")
+# pocket_ranges=("0-2" "25-27" "50-52" "75-77")
 
 pocket_range=${pocket_ranges[$SLURM_ARRAY_TASK_ID]}
 
@@ -42,6 +43,6 @@ pocket_range=${pocket_ranges[$SLURM_ARRAY_TASK_ID]}
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --output_dir test3 --n_samples 32 --rollouts 3 --top_k 10 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range 
 
-# python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --top_k 100 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range
+python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --mode_num_nodes_lig sample --inference_interval 10 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --group_name_suffix _reprod2
 
-python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --top_k 100 --inference_interval 10 --kl_coeff_pretrain 0.0 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range
+# python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 6 --top_k 20 --inference_interval 10 --kl_coeff_pretrain 0.0 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range --group_name_suffix _test

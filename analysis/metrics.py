@@ -1,3 +1,4 @@
+import subprocess
 import numpy as np
 from tqdm import tqdm
 from rdkit import Chem, DataStructs
@@ -156,7 +157,7 @@ class MoleculeProperties:
         return Crippen.MolLogP(rdmol)
 
     @staticmethod
-    def calculate_vina_dock(ligand_mol, receptor_pdbqt_file, center_xyz, use_meeko=False, size=20, exhaustiveness=16, compute_rmsd=True):
+    def calculate_vina(ligand_mol, receptor_pdbqt_file, center_xyz, size=20, exhaustiveness=16, vina_mode='vina_dock', compute_rmsd=False):
         assert ligand_mol.GetNumConformers() > 0
         # mol = Chem.AddHs(ligand_mol)
         # 3D coordinates + quick minimization (ETKDG + MMFF or UFF)
@@ -164,9 +165,11 @@ class MoleculeProperties:
         # Chem.AllChem.MMFFOptimizeMolecule(mol)  # or Chem.AllChem.UFFOptimizeMolecule(mol)
         # center box at ligand's center of mass
 
+        assert vina_mode in {'vina_score','vina_min','vina_dock'}
+
         # cx, cy, cz = ligand_mol.GetConformer().GetPositions().mean(0)
         cx, cy, cz = center_xyz
-        symmetry_rmsd = np.nan
+
         try:
             # Use a unique temp directory per call to avoid collisions when
             # called concurrently from multiple threads/processes.
@@ -174,73 +177,80 @@ class MoleculeProperties:
                 lig_pdbqt = os.path.join(tmpdir, "ligand.pdbqt")
                 out_pdbqt = os.path.join(tmpdir, "ligand_out.pdbqt")
 
-                if use_meeko:
-                    from meeko import MoleculePreparation, PDBQTWriterLegacy
-
-                    # Prepare for docking
-                    preparer = MoleculePreparation()
-                    prepared_list = preparer.prepare(ligand_mol)
-                    assert len(prepared_list) == 1
-                    prepared = prepared_list[0]
-                    writer = PDBQTWriterLegacy()
-                    pdbqt_string, success, error_msg = writer.write_string(prepared)
-                    assert success, error_msg
-                    # Write ligand to a unique temp path
-                    with open(lig_pdbqt, "w") as f:
-                        f.write(pdbqt_string)
-                else:
-                    # RDKit -> molblock (SDF text)
-                    molblock = Chem.MolToMolBlock(ligand_mol, kekulize=False)
-                    # pybel read and write PDBQT
-                    obmol = pybel.readstring("sdf", molblock)
-                    obmol.write("pdbqt", lig_pdbqt, overwrite=True)
+                # RDKit -> molblock (SDF text)
+                molblock = Chem.MolToMolBlock(ligand_mol, kekulize=False)
+                # pybel read and write PDBQT
+                obmol = pybel.readstring("sdf", molblock)
+                obmol.write("pdbqt", lig_pdbqt, overwrite=True)
 
                 # run QuickVina 2 (optionally in score-only mode)
                 cmd = (
-                    f'qvina2 --receptor "{receptor_pdbqt_file}" '
-                    f'--ligand "{lig_pdbqt}" '
+                    f'qvina2 --receptor {receptor_pdbqt_file} '
+                    f'--ligand {lig_pdbqt} '
                     f'--center_x {cx:.4f} --center_y {cy:.4f} --center_z {cz:.4f} '
                     f'--size_x {size} --size_y {size} --size_z {size} '
                     f'--exhaustiveness {exhaustiveness}'
-                    f' --out "{out_pdbqt}"'
+                    # f' --out {out_pdbqt}'
                 )
+                if vina_mode == 'vina_dock':
+                    pass
+                elif vina_mode == 'vina_score':
+                    cmd += " --score_only"
+                elif vina_mode == 'vina_min':
+                    cmd += " --local_only"
                 out = os.popen(cmd).read()
+                # result = subprocess.run(cmd, capture_output=True, text=True)
+                # if result.returncode != 0:
+                #     print(
+                #         f"[WARN] qvina2 failed (code {result.returncode}): {result.stderr.strip() or result.stdout.strip()}"
+                #     )
+                #     return {'vina_metric': np.nan, 'symmetry_rmsd': np.nan}
+                # out = result.stdout
+
                 # write out into a log file named docking_log.txt in working directory, uncomment for debugging
                 # with open("docking_log.txt", "a") as log_file:
                 #     log_file.write(out + "\n")
+                if vina_mode == 'vina_dock':
+                    try:
+                        out_split = out.splitlines()
+                        best_idx = out_split.index('-----+------------+----------+----------') + 1
+                        best_line = out_split[best_idx].split()
+                        assert best_line[0] == '1'
+                        score=float(best_line[1])
+                        # Compute symmetry RMSD between generated pose and redocked pose
+                        if compute_rmsd and out_pdbqt is not None:
+                            out_pdbqt_block = []
+                            with open(out_pdbqt, 'r') as f:
+                                for line in f:
+                                    out_pdbqt_block.append(line)
+                                    if line.startswith("ENDMDL") or line.startswith("ENDPOSE"):
+                                        break
+                            symmetry_rmsd = get_rmsd_between_mol_pdbqt(ligand_mol, "".join(out_pdbqt_block))
+                            return {'vina_metric': score, 'symmetry_rmsd': symmetry_rmsd}
+                        return {'vina_metric': score, 'symmetry_rmsd': np.nan}
+                    except Exception:
+                        return {'vina_metric': np.nan, 'symmetry_rmsd': np.nan}
 
-            # Parse output: docking table (normal mode) or Affinity line (score-only)
-            # if '-----+------------+----------+----------' not in out:
-            #     # Try to parse score-only style output: "Affinity: <value> (kcal/mol)"
-            #     try:
-            #         import re
-            #         m = re.search(r'Affinity:\s*([-+]?\d*\.?\d+)', out)
-            #         if m:
-            #             score = float(m.group(1))
-            #             return -score
-            #         else:
-            #             raise ValueError("No docking score found in output.")
-            #     except Exception:
-            #         pass
-            #     # score = np.nan
-            #     # return -score
-
-            out_split = out.splitlines()
-            best_idx = out_split.index('-----+------------+----------+----------') + 1
-            best_line = out_split[best_idx].split()
-            assert best_line[0] == '1'
-            score=float(best_line[1])
-            # Compute symmetry RMSD between generated pose and redocked pose
-            if compute_rmsd and out_pdbqt is not None:
-                symmetry_rmsd = get_rmsd_between_mol_pdbqt(ligand_mol, out_pdbqt)
-            return {'vina_dock': -score, 'symmetry_rmsd': symmetry_rmsd}
-
-        except Exception as e:
-            print(f"Error calculating docking score: {e}")
-            return {'vina_dock': np.nan, 'symmetry_rmsd': np.nan}
+                # Parse output: docking table (normal mode) or Affinity line (score-only)
+                if vina_mode == 'vina_score' or vina_mode == 'vina_min' and '-----+------------+----------+----------' not in out:
+                    # Try to parse score-only style output: "Affinity: <value> (kcal/mol)"
+                    try:
+                        import re
+                        m = re.search(r'Affinity:\s*([-+]?\d*\.?\d+)', out)
+                        if m:
+                            score = float(m.group(1))
+                            return {'vina_metric': score, 'symmetry_rmsd': np.nan}
+                        else:
+                            raise ValueError("No docking score found in output.")
+                    except Exception:
+                        return {'vina_metric': np.nan, 'symmetry_rmsd': np.nan}
+        except Exception as exc:
+            print(f"Exception calculating vina metric: {exc}")
+            return {'vina_metric': np.nan, 'symmetry_rmsd': np.nan}
 
     @staticmethod
-    def calculate_docking_score(ligand_mol, receptor_pdbqt_file, center_xyz, use_meeko=False, size=20, exhaustiveness=16, score_only=False):
+    def calculate_docking_score(ligand_mol, receptor_pdbqt_file, center_xyz, use_meeko=False, size=20, exhaustiveness=16, vina_mode='vina_score'):
+        assert vina_mode in {'vina_score','vina_min','vina_dock'}
         assert ligand_mol.GetNumConformers() > 0
         # mol = Chem.AddHs(ligand_mol)
         # 3D coordinates + quick minimization (ETKDG + MMFF or UFF)
@@ -285,26 +295,31 @@ class MoleculeProperties:
                     f'--size_x {size} --size_y {size} --size_z {size} '
                     f'--exhaustiveness {exhaustiveness}'
                 )
-                if score_only:
+                if vina_mode == 'vina_score':
                     cmd += ' --score_only'
+                elif vina_mode == 'vina_min':
+                    cmd += ' --local_only'
+                elif vina_mode == 'vina_dock':
+                    pass
                 out = os.popen(cmd).read()
                 # write out into a log file named docking_log.txt in working directory, uncomment for debugging
                 # with open("docking_log.txt", "a") as log_file:
                 #     log_file.write(out + "\n")
 
             # Parse output: docking table (normal mode) or Affinity line (score-only)
-            if '-----+------------+----------+----------' not in out:
+            if vina_mode == 'vina_score' or vina_mode == 'vina_min':
+                assert '-----+------------+----------+----------' not in out
                 # Try to parse score-only style output: "Affinity: <value> (kcal/mol)"
                 try:
                     import re
                     m = re.search(r'Affinity:\s*([-+]?\d*\.?\d+)', out)
                     if m:
                         score = float(m.group(1))
-                        return -score
+                        return score
                     else:
                         raise ValueError("No docking score found in output.")
                 except Exception:
-                    pass
+                    return np.nan
                 # score = np.nan
                 # return -score
 
@@ -313,7 +328,7 @@ class MoleculeProperties:
             best_line = out_split[best_idx].split()
             assert best_line[0] == '1'
             score=float(best_line[1])
-            return -score
+            return score
 
         except Exception as e:
             print(f"Error calculating docking score: {e}")
@@ -381,8 +396,8 @@ class MoleculeProperties:
             except Exception as e:
                 pass
 
-        for k, v in pose_check_results.items():
-            mol.SetProp(k, str(v))
+        # for k, v in pose_check_results.items():
+        #     mol.SetProp(k, str(v))
 
         return pose_check_results
 

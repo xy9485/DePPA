@@ -112,14 +112,32 @@ if __name__ == "__main__":
                           center_xyz=mean_coord_reference_ligand,
                           receptor_pdbqt_file=receptor_pdbqt_file,
                           use_meeko=False,
-                          score_only=True
+                          vina_mode='vina_score',
                           ),
+        # 'vina_min': partial(model.molecule_properties.calculate_docking_score,
+        #                   center_xyz=mean_coord_reference_ligand,
+        #                   receptor_pdbqt_file=receptor_pdbqt_file,
+        #                   use_meeko=False,
+        #                   vina_mode='vina_min',
+        #                   ),
         # 'vina_dock': partial(model.molecule_properties.calculate_docking_score,
         #                   center_xyz=mean_coord_reference_ligand,
         #                   receptor_pdbqt_file=receptor_pdbqt_file,
         #                   use_meeko=False,
-        #                   score_only=False
-        #                   ),  
+        #                   vina_mode='vina_dock',
+        #                   ),
+        # 'vina_dock': partial(model.molecule_properties.calculate_vina,
+        #                      receptor_pdbqt_file=receptor_pdbqt_file,
+        #                      center_xyz=mean_coord_reference_ligand,
+        #                      vina_mode='vina_dock',
+        #                     compute_rmsd=False
+        #                      ),
+        # 'vina_min': partial(model.molecule_properties.calculate_vina,
+        #                      receptor_pdbqt_file=receptor_pdbqt_file,
+        #                      center_xyz=mean_coord_reference_ligand,
+        #                      vina_mode='vina_min',
+        #                      compute_rmsd=False
+        #                      ),
         # 'posecheck': partial(model.molecule_properties.pose_check,
         #                      posecheck_protein=posecheck.utils.loading.load_protein_from_pdb(args.pdbfile),
         #                      compute_strain=True,
@@ -146,6 +164,7 @@ if __name__ == "__main__":
         #                   ),
         reward_fn_dict=reward_fn_dict,
         kl_coeff_pretrain=0.0,
+        reward_num_workers=4,
         reward_weights={
                 "qed": 0.27,
                 "sa": 0.13,
@@ -157,7 +176,7 @@ if __name__ == "__main__":
         project="DiffSBDD-PPO",
         mode="offline",
         group="DiffSBDD-" +pdb_id,
-        name="ii10_ligSizeRef_NormRank_Penalty-3std_strain_clash_QED0.3_SA0.3_Vina0.4_Distance0.0_KL0.0_"+pdb_id,
+        name="ii10_ligSizeSample_NormRank_Penalty-3std_strain_clash_QED0.3_SA0.3_Vina0.4_Distance0.0_KL0.0_"+pdb_id,
         config=vars(ppo_config),
     )
     wandb_logger = LoggerWandb()
@@ -168,7 +187,8 @@ if __name__ == "__main__":
         model.ddpm_pretrained.eval()
         for p in model.ddpm_pretrained.parameters():
             p.requires_grad_(False)
-    for i in range(500):
+    for i in range(100):
+        print(f"GRPO Iteration {i}")
         metrics, sample_records = model.generate_ligands_rl(
             args.pdbfile, args.batch_size, args.resi_list, args.ref_ligand,
             num_nodes_lig, args.sanitize, largest_frag=not args.all_frags,

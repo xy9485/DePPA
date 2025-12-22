@@ -999,12 +999,15 @@ class LigandPocketDDPM(pl.LightningModule):
             def _compute_reward(mol_pc, reward_fn_dict, add_hydrogens, sanitize, relax_iter, largest_frag):
                 # create a reward_dict based on keys in reward_fn_dict
                 reward_dict = {'valid': 0} # valid indicates check_molecule_connectivity and sanitization check
+                reward_dict['connectivity'] = 0.0  # default connectivity to 0.0
                 # for key in reward_fn_dict:
                 #     reward_dict[key] = 0.0
                 reward_dict['qed'] = 0.0  # default qed to 0.0
                 reward_dict['sa'] = 0.0  # default sa to 0.0
                 reward_dict['vina_score'] = 0.0  # default vina_score to 0.0
+                reward_dict['vina_min'] = 0.0  # default vina_min to 0.0
                 reward_dict['vina_dock'] = 0.0  #
+                reward_dict['sc_rmsd'] = 0.0  #
                 reward_dict['strain'] = 0.0  # default strain energy to 0.0
                 reward_dict['clash'] = 0.0  # default clash to 0.0
                 reward_dict['hb_donor'] = 0.0  # default hb_donor to 0.0
@@ -1027,12 +1030,17 @@ class LigandPocketDDPM(pl.LightningModule):
                 if mol is None: # Sanitization failed
                     return None, reward_dict
 
-                # check connectivity threshold
+                if largest_frag:
+                    if mol.GetNumAtoms() >= n_mol_atoms:
+                        reward_dict['connectivity'] = 1.0
+                # check connectivity threshold when largest_frag is false
                 if not largest_frag:
                     mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True)
                     largest_mol = max(mol_frags, default=mol, key=lambda m: m.GetNumAtoms())
                     if largest_mol.GetNumAtoms() / n_mol_atoms < self.ligand_metrics.connectivity_thresh:
                         return None, reward_dict
+                    else:
+                        reward_dict['connectivity'] = 1.0
 
                   # to ensure molecule is processed
                 # r = ppo_config.reward_fn(mol)
@@ -1040,16 +1048,30 @@ class LigandPocketDDPM(pl.LightningModule):
                     vina_score = reward_fn_dict['vina_score'](mol)
                     if np.isnan(vina_score):
                         return None, reward_dict
-                    reward_dict['vina_score'] = vina_score
+                    reward_dict['vina_score'] = -vina_score
+                if 'vina_min' in reward_fn_dict:
+                    vina_min = reward_fn_dict['vina_min'](mol)
+                    if np.isnan(vina_min):
+                        return None, reward_dict
+                    reward_dict['vina_min'] = -vina_min
+                    # reward_dict['sc_rmsd'] = vina_min_dict['symmetry_rmsd']
                 if 'vina_dock' in reward_fn_dict:
-                    reward_dict['vina_dock'] = reward_fn_dict['vina_dock'](mol)
+                    vina_dock = reward_fn_dict['vina_dock'](mol)
+                    if np.isnan(vina_dock):
+                        return None, reward_dict
+                    reward_dict['vina_dock'] = -vina_dock
+                    # reward_dict['sc_rmsd'] = vina_dock_dict['symmetry_rmsd']
                 if 'qed' in reward_fn_dict:
                     reward_dict['qed'] = reward_fn_dict['qed'](mol)
                 if 'sa' in reward_fn_dict:
                     reward_dict['sa'] = reward_fn_dict['sa'](mol)
                 if 'posecheck' in reward_fn_dict:
                     pose_check_results = reward_fn_dict['posecheck'](mol)
-                    reward_dict.update(pose_check_results)
+                    if pose_check_results.get('strain'):
+                        reward_dict['strain'] = -pose_check_results['strain']
+                    if pose_check_results.get('clash'):
+                        reward_dict['clash'] = -pose_check_results['clash']
+                    # reward_dict.update(pose_check_results)
 
                 # if isinstance(r, (tuple, list)):
                 #     r = r[0]
@@ -1168,7 +1190,10 @@ class LigandPocketDDPM(pl.LightningModule):
             w_sa = ppo_config.reward_weights['sa']
             w_vina_score = ppo_config.reward_weights['vina_score']
             w_distance = ppo_config.reward_weights['distance']
+            w_strain = ppo_config.reward_weights.get('strain', 0.0)
             combined = norm_qed * w_qed + norm_sa * w_sa + norm_vina_score * w_vina_score + norm_distance * w_distance
+            if w_strain > 0.0:
+                combined += norm_strain * w_strain
             # -------A more flexible way to handle multiple properties--------
             # property_arrays = {}
             # norm_properties = {}
@@ -1299,11 +1324,14 @@ class LigandPocketDDPM(pl.LightningModule):
                         "qed": float(reward_dict.get("qed", 0.0)),
                         "sa": float(reward_dict.get("sa", 0.0)),
                         "vina_score": float(reward_dict.get("vina_score", 0.0)),
+                        "vina_min": float(reward_dict.get("vina_min", 0.0)),
                         "vina_dock": float(reward_dict.get("vina_dock", 0.0)),
-                        "distance": float(distance_array[idx]),
-                        "num_atoms": int(mol.GetNumAtoms()),
+                        "sc_rmsd": float(reward_dict.get("sc_rmsd", 0.0)),
                         "strain": float(reward_dict.get("strain", 0.0)),
                         "clash": float(reward_dict.get("clash", 0.0)),
+                        "distance": float(distance_array[idx]),
+                        "num_atoms": int(mol.GetNumAtoms()),
+                        "connectivity": float(reward_dict.get("connectivity", 0.0)),
                     }
                 })
 
@@ -1312,27 +1340,39 @@ class LigandPocketDDPM(pl.LightningModule):
             rewards_std = rewards.std()
             advantages = (rewards - rewards_mean) / (rewards_std + 1e-8)
 
+            def _get_mean_from_records(records, key):
+                if len(records) == 0:
+                    return 0.0
+                return np.mean([rec['metrics'][key] for rec in records])
+
             # Log episodic metrics for logging, like wandb
             episodic_metrics["combined_rewards"] = rewards_mean.item()
             episodic_metrics["combined_reward_std"] = rewards_std.item()
             episodic_metrics["valid_combined_mu"] = mu
             episodic_metrics["valid_combined_std"] = sigma
-            episodic_metrics["qed"] = np.mean(properties_dict.get('qed', [0.0]*len(results)))
-            episodic_metrics["sa"] = np.mean(properties_dict.get('sa', [0.0]*len(results)))
-            episodic_metrics["docking_score"] = np.mean(properties_dict.get('vina_score', [0.0]*len(results)))
-            episodic_metrics["vina_score"] = np.mean(properties_dict.get('vina_score', [0.0]*len(results)))
-            episodic_metrics["vina_dock"] = np.mean(properties_dict.get('vina_dock', [0.0]*len(results)))
-            episodic_metrics["strain"] = np.mean(properties_dict.get('strain', [0.0]*len(results)))
-            episodic_metrics["clash"] = np.mean(properties_dict.get('clash', [0.0]*len(results)))
+            episodic_metrics["qed"] = _get_mean_from_records(sample_records, 'qed')
+            episodic_metrics["sa"] = _get_mean_from_records(sample_records, 'sa')
+            episodic_metrics["docking_score"] = _get_mean_from_records(sample_records, 'vina_score')
+            episodic_metrics["vina_score"] = _get_mean_from_records(sample_records, 'vina_score')
+            episodic_metrics["vina_min"] = _get_mean_from_records(sample_records, 'vina_min')
+            episodic_metrics["vina_dock"] = _get_mean_from_records(sample_records, 'vina_dock')
+            episodic_metrics["strain"] = _get_mean_from_records(sample_records, 'strain')
+            episodic_metrics["clash"] = _get_mean_from_records(sample_records, 'clash')
+            episodic_metrics["connectivity"] = _get_mean_from_records(sample_records, 'connectivity')
             episodic_metrics["distance"] = mean_distance
             episodic_metrics["valid_rate"] = float(len(molecules)) / float(len(results)) if len(results) > 0 else 0.0
-            episodic_metrics["diversity"] = analyze_out['Diversity']
             episodic_metrics["mean_size"] = sum([mol.GetNumAtoms() for mol in molecules]) / len(molecules) if len(molecules) > 0 else 0.0
             # episodic_metrics["qed"] = analyze_out['QED']
             # episodic_metrics["sa"] = analyze_out['SA']
             # episodic_metrics["logp"] = analyze_out['LogP']
+            episodic_metrics['diveristy'] = analyze_out['Diversity']
+            episodic_metrics["Diversity"] = analyze_out['Diversity']
             episodic_metrics["Validity"] = analyze_out['Validity']
             episodic_metrics["Connectivity"] = analyze_out['Connectivity']
+            episodic_metrics["QED"] = analyze_out['QED']
+            episodic_metrics["SA"] = analyze_out['SA']
+            episodic_metrics["LogP"] = analyze_out['LogP']
+            episodic_metrics["Lipinski"] = analyze_out['Lipinski']
         else:
             # No reward function provided; zero-advantages prevents updates
             print("No reward function provided in PPO config; skipping reward computation.")
@@ -1351,6 +1391,12 @@ class LigandPocketDDPM(pl.LightningModule):
         
         # dict_ligsize_reward = {str(sz): rw for sz, rw in zip(num_nodes_lig.tolist(), rewards_list)}
         # print(f"Rollout ligand sizes and rewards: {dict_ligsize_reward} ")
+        print(f"valid_array: {np.array(properties_dict['valid'])}")
+        print(f"vina_score: {properties_dict['vina_score']}")
+        print(f"vina_min: {properties_dict['vina_min']}")
+        print(f"vina_dock: {properties_dict['vina_dock']}")
+        print(f"strain energy: {properties_dict['strain']}")
+        print(f"clash score: {properties_dict['clash']}")
         print("pdb_file:", pdb_file)
         print("Episodic metrics:", episodic_metrics)
         print(f"Rollout combined rewards mean: {rewards.mean().item()}, std: {rewards.std().item()}")
