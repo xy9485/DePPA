@@ -18,15 +18,19 @@ METRIC_FIELDS = [
     "qed",
     "sa",
     "distance",
-    "vina_score",
-    "vina_dock",
     "strain",
     "clash",
+    "connectivity",
+    "vina_score",
+    "vina_min",
+    "vina_dock",
+    "sc_rmsd"
 ]
 
 RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5} # from paper MolJO
+# RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5, "distance": 1.0}
 # RERANK_WEIGHTS = {"qed": 0.27, "sa": 0.13, "vina_score": 0.3, "distance": 0.3} 
-RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5, "strain": 1.5} 
+# RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5, "strain": 1.5} 
 
 
 def parse_args():
@@ -40,6 +44,16 @@ def parse_args():
         "--results_dir",
         type=Path,
         help="Directory that contains one subdirectory per pocket with score CSVs.",
+    )
+    parser.add_argument(
+        "--csv_name",
+        type=str,
+        default="raw.csv",
+    )
+    parser.add_argument(
+        "--sdf_name",
+        type=str,
+        default="raw.sdf",
     )
     # parser.add_argument(
     #     "--top_n_filename",
@@ -58,6 +72,12 @@ def parse_args():
             "How many entries to keep per pocket when computing top scores "
         ),
     )
+
+    parser.add_argument(
+        "--summarize_over_all_pockets",
+        action="store_true",
+        help="Whether to summarize over all pockets into a single CSV.",
+        )
     return parser.parse_args()
 
 
@@ -196,10 +216,10 @@ def zscore_rerank_csv_sdf_given_dir(search_dir: Path, csv_name: str, sdf_name: s
             mean, std = stats[field]
             normalized = (value - mean) / std
             score += weight * normalized
-        row["z_score"] = score
+        row["weighted_sum_z_score"] = score
         row["_z_internal"] = score
 
-    # based on z_score to sort rows and molecules
+    # based on weighted_sum_z_score to sort rows and molecules
     paired = list(zip(rows, molecules))
     sorted_paired = sorted(
         paired,
@@ -213,8 +233,8 @@ def zscore_rerank_csv_sdf_given_dir(search_dir: Path, csv_name: str, sdf_name: s
 
     weights_str = "_".join([f"{k}{v}" for k, v in weights.items()])
     fieldnames = list(csv_reader.fieldnames or rows[0].keys())
-    # if "z_score" not in fieldnames:
-    #     fieldnames.append("z_score")
+    if "weighted_sum_z_score" not in fieldnames:
+        fieldnames.append("weighted_sum_z_score")
 
     top_csv_path = search_dir / f"rerank_top{top_n}_{weights_str}.csv"
     with top_csv_path.open("w", newline="") as handle:
@@ -280,7 +300,8 @@ def summarize_over_csv_files2(csv_files, save_path, fields) -> None:
     # Compute the OVERALL row by averaging each metric across pockets.
     overall_row = {"pocket": "OVERALL", "count": None}
     for field in fields:
-        values = [summary[field] for summary in pocket_summaries if summary[field] is not None]
+        # values = [summary[field] for summary in pocket_summaries if summary[field] is not None]
+        values = [summary.get(field, 0.0) for summary in pocket_summaries]
         overall_row[field] = safe_mean(values)
 
     with save_path.open("w", newline="") as handle:
@@ -292,20 +313,22 @@ def summarize_over_csv_files2(csv_files, save_path, fields) -> None:
     print(f"Wrote statistics for {len(pocket_summaries)} pockets to {save_path}.")
 
 if __name__ == "__main__":
+    # RERANK_WEIGHTS defines the ranking scheme
     args = parse_args()
 
     rerank_top_csv_files = []
     # iterate each subdirectory in args.results_dir to find csv files
-    for pocket_dir in sorted(args.results_dir.iterdir()):
-        print(f"Processing pocket directory: {pocket_dir}")
+    for pocket_dir_idx, pocket_dir in enumerate(sorted(args.results_dir.iterdir())):
+        print(f"======Processing {pocket_dir_idx}th pocket directory: {pocket_dir}======")
         if not pocket_dir.is_dir():
             continue
-        rerank_top_csv, rerank_top_sdf = zscore_rerank_csv_sdf_given_dir(pocket_dir, csv_name="raw_scores.csv", sdf_name="raw.sdf", top_n=args.top_n, weights=RERANK_WEIGHTS)
+        rerank_top_csv, rerank_top_sdf = zscore_rerank_csv_sdf_given_dir(pocket_dir, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n, weights=RERANK_WEIGHTS)
         rerank_top_csv_files.append(rerank_top_csv)
 
-    weights_str = "_".join([f"{k}{v}" for k, v in RERANK_WEIGHTS.items()])
-    summarize_over_csv_files2(
-        rerank_top_csv_files,
-        args.results_dir / f"summary_rerank_top{args.top_n}_{weights_str}.csv",
-        fields=METRIC_FIELDS
-    )
+    if args.summarize_over_all_pockets:
+        weights_str = "_".join([f"{k}{v}" for k, v in RERANK_WEIGHTS.items()])
+        summarize_over_csv_files2(
+            rerank_top_csv_files,
+            args.results_dir / f"summary_rerank_top{args.top_n}_{weights_str}.csv",
+            fields=METRIC_FIELDS
+        )

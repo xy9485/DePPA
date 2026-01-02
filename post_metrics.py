@@ -13,10 +13,11 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
-from rdkit import Chem
+from rdkit import Chem, DataStructs
 from openbabel import pybel
 
-from analysis.eval_rmsd import get_rmsd_between_mol_pdbqt
+from analysis.eval_rmsd import get_rmsd_between_mol_pdbqt, get_rmsd_between_mols, get_mol_from_pdbqt_file, pdbqt_to_rdmol_openbabel
+
 
 DESIRED_OUTPUT_COLUMNS = [
     "rank",
@@ -24,7 +25,7 @@ DESIRED_OUTPUT_COLUMNS = [
     "qed",
     "sa",
     "distance",
-    "distance2",
+    "distance_post",
     "strain",
     "clash",
     "connectivity",
@@ -53,6 +54,18 @@ if os.getenv('ENABLE_DEBUG', 'false').lower() == 'true':
     print("🔍 Waiting for debugger attach on port 5675...")
     debugpy.wait_for_client()
 
+def _compute_diversity_for_mol_list(mol_list):
+    fps = [Chem.RDKFingerprint(mol) for mol in mol_list]
+    distances = []
+    for i, fp in enumerate(fps):
+        sims = [
+            DataStructs.TanimotoSimilarity(fp, other_fp)
+            for j, other_fp in enumerate(fps)
+            if j != i
+        ]
+        distances.append(0.0 if not sims else 1.0 - float(np.mean(sims)))
+    return distances
+
 def _load_molecules(sdf_path: Path) -> List[Optional[Chem.Mol]]:
     """Read molecules from an SDF file while keeping their original order."""
     if not sdf_path.exists():
@@ -61,6 +74,8 @@ def _load_molecules(sdf_path: Path) -> List[Optional[Chem.Mol]]:
     # supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False, sanitize=False)
     # supplier = Chem.SDMolSupplier(str(sdf_path), sanitize=False) # earlier version uses sanitize=False when writing to sdf
     supplier = Chem.SDMolSupplier(str(sdf_path)) # arguments used for reading from sdf should align with how it was written
+    # supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=False)
+    # supplier = Chem.SDMolSupplier(str(sdf_path), removeHs=True)
     molecules: List[Optional[Chem.Mol]] = []
     for idx, mol in enumerate(supplier):
         if mol is None:
@@ -80,87 +95,6 @@ def _load_molecules(sdf_path: Path) -> List[Optional[Chem.Mol]]:
         print(f"[WARN] No molecules were found in {sdf_path}.")
 
     return molecules
-
-
-def _locate_sdf(input_path: Path, filename: str = "raw.sdf") -> Path:
-    """Return the SDF file path given an input that may be a directory or file."""
-    if input_path.is_file():
-        assert input_path.suffix == ".sdf"
-        return input_path
-
-    if not input_path.is_dir():
-        raise FileNotFoundError(f"Input path does not exist: {input_path}")
-
-    direct = input_path / filename
-    if direct.exists():
-        return direct
-
-    matches = sorted(input_path.rglob(filename))
-    if not matches:
-        raise FileNotFoundError(
-            f"Unable to find {filename} under directory {input_path}"
-        )
-
-    if len(matches) > 1:
-        print(
-            f"[WARN] Multiple '{filename}' files found under {input_path}; using {matches[0]}"
-        )
-    return matches[0]
-
-
-def _locate_csv(pocket_dir: Path, filename: str = "raw_scores.csv") -> Path:
-    csv_path = pocket_dir / filename
-    if csv_path.exists():
-        return csv_path
-    matches = sorted(pocket_dir.rglob(filename))
-    if not matches:
-        raise FileNotFoundError(
-            f"Unable to find {filename} under directory {pocket_dir}"
-        )
-    if len(matches) > 1:
-        print(f"[WARN] Multiple '{filename}' files found; using {matches[0]}")
-    return matches[0]
-
-
-def _locate_receptor_pdb(pocket_name: str, pocket_dir: Path) -> Path:
-    """Find the PDB receptor file that matches the pocket name."""
-    if not pocket_dir.exists():
-        raise FileNotFoundError(f"Pocket directory does not exist: {pocket_dir}")
-
-    candidate = pocket_dir / f"{pocket_name}.pdb"
-    if candidate.exists():
-        return candidate
-
-    matches = sorted(pocket_dir.rglob(f"{pocket_name}.pdb"))
-    if not matches:
-        raise FileNotFoundError(
-            f"Unable to locate receptor PDB for {pocket_name} under {pocket_dir}"
-        )
-
-    if len(matches) > 1:
-        print(f"[WARN] Multiple receptor PDB files found; using {matches[0]}")
-    return matches[0]
-
-
-def _locate_receptor_pdbqt(pocket_name: str, pocket_dir: Path) -> Path:
-    """Find the PDBQT receptor file that matches the pocket name."""
-    if not pocket_dir.exists():
-        raise FileNotFoundError(f"Pocket directory does not exist: {pocket_dir}")
-
-    candidate = pocket_dir / f"{pocket_name}.pdbqt"
-    if candidate.exists():
-        return candidate
-
-    matches = sorted(pocket_dir.rglob(f"{pocket_name}.pdbqt"))
-    if not matches:
-        raise FileNotFoundError(
-            f"Unable to locate receptor PDBQT for {pocket_name} under {pocket_dir}"
-        )
-
-    if len(matches) > 1:
-        print(f"[WARN] Multiple receptor PDBQT files found; using {matches[0]}")
-    return matches[0]
-
 
 def _ligand_centroid_backup(mol: Chem.Mol) -> Optional[Tuple[float, float, float]]:
     if mol.GetNumConformers() == 0:
@@ -266,6 +200,7 @@ def _run_qvina(
     exhaustiveness: int,
     vina_mode: str = "vina_dock",
     compute_rmsd: bool = False,
+    use_meeko: bool = False,
 ) -> Tuple[float, float]:
     assert vina_mode in {"vina_dock", "vina_min", "vina_score"}
     cx, cy, cz = centroid
@@ -276,9 +211,23 @@ def _run_qvina(
         lig_pdbqt = Path(tmpdir) / "ligand.pdbqt"
         out_pdbqt = Path(tmpdir) / "ligand_out.pdbqt"
 
-        molblock = Chem.MolToMolBlock(mol, kekulize=False)
-        obmol = pybel.readstring("sdf", molblock)
-        obmol.write("pdbqt", str(lig_pdbqt), overwrite=True)
+        if use_meeko:
+            from meeko import MoleculePreparation, PDBQTWriterLegacy, PDBQTMolecule
+
+            # Prepare the ligand using Meeko
+            mk_prep = MoleculePreparation(merge_these_atom_types=("H",))
+            mol = Chem.AddHs(mol, addCoords=mol.GetNumConformers() > 0)
+            molsetup_list = mk_prep(mol)
+            mol_setup = molsetup_list[0]
+            pdbqt_string, success, error_msg = PDBQTWriterLegacy.write_string(mol_setup)
+
+            # Write the prepared ligand to a PDBQT file
+            with open(lig_pdbqt, "w") as f:
+                f.write(pdbqt_string)
+        else:
+            molblock = Chem.MolToMolBlock(mol, kekulize=False)
+            obmol = pybel.readstring("sdf", molblock)
+            obmol.write("pdbqt", str(lig_pdbqt), overwrite=True)
 
         cmd = [
             "qvina2",
@@ -323,14 +272,29 @@ def _run_qvina(
 
         if vina_mode == "vina_dock" and compute_rmsd:
             if not out_pdbqt.exists():
-                print("[WARN] qvina2 did not produce an output PDBQT; skipping RMSD.")
                 raise FileNotFoundError("qvina2 did not produce an output PDBQT; skipping RMSD.")
             else:
-                try:
-                    symmetry_rmsd = get_rmsd_between_mol_pdbqt(mol, str(out_pdbqt))
-                except Exception as exc:
-                    print(f"[WARN] Failed to compute RMSD from qvina output: {exc}")
-                    raise ValueError(f"Failed to compute RMSD from qvina output: {exc}")
+                if use_meeko:
+                    from meeko import PDBQTMolecule, RDKitMolCreate
+                    # with open(out_pdbqt, 'r') as f:
+                    #         pdbqt_data = f.read()
+                    # pdbqt_mol = PDBQTMolecule(pdbqt_data)
+                    # # Because the metadata exists, this mol will have the SAME atom order as mol before redocking,
+                    # # Exporting directly to RDKit bypasses the 'lossy' PDB/SDF conversion steps
+                    # # We take the 0th index for the best pose
+                    # docked_mol = pdbqt_mol[0].export_rdkit_mol()
+                    pdbqt_mol = PDBQTMolecule.from_file(str(out_pdbqt), skip_typing=True)
+                    rdkitmol_list = RDKitMolCreate.from_pdbqt_mol(pdbqt_mol)
+                    docked_mol = rdkitmol_list[0]
+                else:
+                    # symmetry_rmsd = get_rmsd_between_mol_pdbqt(mol, str(out_pdbqt))
+                    docked_mol = pdbqt_to_rdmol_openbabel(str(out_pdbqt))
+                    # docked_mol = get_mol_from_pdbqt_file(str(out_pdbqt))
+                    if docked_mol is None:
+                        raise ValueError("Failed to convert qvina output PDBQT to RDMol.")
+                # docked_mol_aligned = Chem.AllChem.AssignBondOrdersFromTemplate(mol, docked_mol)
+                symmetry_rmsd = get_rmsd_between_mols(mol, docked_mol)
+
     return score, symmetry_rmsd
 
 
@@ -361,48 +325,47 @@ def _calculate_vina_metrics_for_molecules(
             # metrics.append(entry)
             # continue
 
-        try:
-            vina_dock_score, rmsd = _run_qvina(
-                mol=mol,
-                receptor_pdbqt=receptor_pdbqt,
-                centroid=centroid,
-                size=size,
-                exhaustiveness=exhaustiveness,
-                vina_mode="vina_dock",
-                compute_rmsd=False,
-            )
-            if not math.isnan(vina_dock_score):
-                entry["vina_dock"] = vina_dock_score
-            if not math.isnan(rmsd):
-                entry["sc_rmsd"] = rmsd
 
-            vina_min_score, _ = _run_qvina(
-                mol=mol,
-                receptor_pdbqt=receptor_pdbqt,
-                centroid=centroid,
-                size=size,
-                exhaustiveness=exhaustiveness,
-                vina_mode="vina_min",
-                compute_rmsd=False,
-            )
-            if not math.isnan(vina_min_score):
-                entry["vina_min"] = vina_min_score
+        vina_dock_score, rmsd = _run_qvina(
+            mol=mol,
+            receptor_pdbqt=receptor_pdbqt,
+            centroid=centroid,
+            size=size,
+            exhaustiveness=exhaustiveness,
+            vina_mode="vina_dock",
+            compute_rmsd=True,
+            use_meeko=False,
+        )
+        if not math.isnan(vina_dock_score):
+            entry["vina_dock"] = vina_dock_score
+        if not math.isnan(rmsd):
+            entry["sc_rmsd"] = rmsd
 
-            vina_score, _ = _run_qvina(
-                mol=mol,
-                receptor_pdbqt=receptor_pdbqt,
-                centroid=centroid,
-                size=size,
-                exhaustiveness=exhaustiveness,
-                vina_mode="vina_score",
-                compute_rmsd=False,
-            )
-            if not math.isnan(vina_score):
-                entry["vina_score"] = vina_score
-            
-            print(f"sc_rmsd: {entry['sc_rmsd']}, vina_dock: {entry['vina_dock']}, vina_min: {entry['vina_min']}, vina_score: {entry['vina_score']}")
-        except Exception as exc:
-            print(f"[WARN] qvina metrics failed for molecule #{idx + 1}: {exc}")
+        vina_min_score, _ = _run_qvina(
+            mol=mol,
+            receptor_pdbqt=receptor_pdbqt,
+            centroid=centroid,
+            size=size,
+            exhaustiveness=exhaustiveness,
+            vina_mode="vina_min",
+            compute_rmsd=False,
+        )
+        if not math.isnan(vina_min_score):
+            entry["vina_min"] = vina_min_score
+
+        vina_score, _ = _run_qvina(
+            mol=mol,
+            receptor_pdbqt=receptor_pdbqt,
+            centroid=centroid,
+            size=size,
+            exhaustiveness=exhaustiveness,
+            vina_mode="vina_score",
+            compute_rmsd=False,
+        )
+        if not math.isnan(vina_score):
+            entry["vina_score"] = vina_score
+        
+        print(f"sc_rmsd: {entry['sc_rmsd']}, vina_dock: {entry['vina_dock']}, vina_min: {entry['vina_min']}, vina_score: {entry['vina_score']}")
 
         metrics.append(entry)
 
@@ -428,11 +391,10 @@ def _run_posecheck2(
 
     results: List[Dict[str, float]] = []
     for idx, mol in enumerate(molecules):
-        print(f"Processing molecule #{idx + 1} with size {mol.GetNumAtoms()} atoms.")
+        print(f"Posecheck processing molecule #{idx + 1} with size {mol.GetNumAtoms()} atoms.")
         entry = {"strain": math.nan, "clash": math.nan}
         if mol is None:
-            results.append(entry)
-            continue
+            raise ValueError(f"Molecule #{idx + 1} is None; cannot compute PoseCheck metrics.")
 
         try:
             pc.load_ligands_from_mols([mol])
@@ -441,23 +403,21 @@ def _run_posecheck2(
             print(
                 f"[WARN] Failed to load ligand #{idx + 1} into PoseCheck (skipping): {exc}"
             )
+            print(f"Strain: {entry['strain']}, Clash: {entry['clash']}")
             results.append(entry)
             continue
 
         try:
-            print(f"Computing strain energy for molecule #{idx + 1}.")
             entry["strain"] = pc.calculate_strain_energy()[0]
-            print(f"Strain energy: {entry['strain']}")
         except Exception as exc:
             print(f"[WARN] PoseCheck strain failed on entry #{idx + 1}: {exc}")
 
         try:
-            print(f"Computing clash count for molecule #{idx + 1}.")
             entry["clash"] = pc.calculate_clashes()[0]
-            print(f"Clash count: {entry['clash']}")
         except Exception as exc:
             print(f"[WARN] PoseCheck clash failed on entry #{idx + 1}: {exc}")
 
+        print(f"Strain: {entry['strain']}, Clash: {entry['clash']}")
         results.append(entry)
 
     return results
@@ -497,7 +457,13 @@ def _parse_args() -> argparse.Namespace:
         "--csv_name",
         type=str,
         default=None,
-        help="Filename of the SDF file to process (default: raw.sdf).",
+        help="Filename of the csv file to process",
+    )
+    parser.add_argument(
+        "--sdf_name",
+        type=str,
+        default=None,
+        help="Filename of the SDF file to process",
     )
     parser.add_argument(
         "--pocket_pdb_dir",
@@ -536,7 +502,7 @@ def _parse_args() -> argparse.Namespace:
     #     default=16,
     #     help="qvina2 exhaustiveness level for RMSD docking (default: 16).",
     # )
-    parser.set_defaults(compute_posecheck=True, compute_vina=True)
+    parser.set_defaults(compute_posecheck=True, compute_vina=True, compute_diversity=True)
     parser.add_argument(
         "--compute_posecheck",
         dest="compute_posecheck",
@@ -561,6 +527,18 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable qvina2-derived metrics.",
     )
+    parser.add_argument(
+        "--compute_diversity",
+        dest="compute_diversity",
+        action="store_true",
+        help="Compute molecular diversity metrics (default: enabled).",
+    )
+    parser.add_argument(
+        "--skip_diversity",
+        dest="compute_diversity",
+        action="store_false",
+        help="Disable molecular diversity metrics.",
+    )
     parser.set_defaults(vina_use_reflig_centroid=True)
     parser.add_argument(
         "--vina_use_reflig_centroid",
@@ -580,11 +558,14 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def post_fill_metrics(dir_post_fill: Path, csv_name: str, pocket_pdb_dir: Path, compute_vina: bool=True, vina_use_reflig_centroid: bool=True, compute_posecheck: bool=True, out_csv_name: str=None, overwrite: bool=False) -> None:
+def post_fill_metrics(dir_post_fill: Path, csv_name: str, sdf_name: str=None, pocket_pdb_dir: Path=None, compute_vina: bool=True, vina_use_reflig_centroid: bool=True, compute_posecheck: bool=True, compute_diversity: bool=True, out_csv_name: str=None, overwrite: bool=False) -> None:
 
     csv_path: Path = dir_post_fill / csv_name
-    assert csv_path.name.endswith("_scores.csv")
-    sdf_path: Path = dir_post_fill / csv_name.replace("_scores.csv", ".sdf")
+    # assert csv_path.name.endswith("_scores.csv")
+    if sdf_name is None:
+        # sdf_name share the same name with csv_name but with .sdf extension
+        sdf_name = csv_path.stem + ".sdf"
+    sdf_path = dir_post_fill / sdf_name
     assert sdf_path.exists(), f"SDF file does not exist: {sdf_path}"
     assert csv_path.exists(), f"CSV file does not exist: {csv_path}"
     pocket_name = dir_post_fill.name
@@ -657,6 +638,11 @@ def post_fill_metrics(dir_post_fill: Path, csv_name: str, pocket_pdb_dir: Path, 
         # raw_scores["strain"] = posecheck_results['strain']
         # raw_scores["clash"] = posecheck_results['clash']
 
+    if compute_diversity:
+        print("[Diversity] Start Computing diversity metrics...")
+        distances = _compute_diversity_for_mol_list(molecules)
+        assert len(distances) == len(molecules)
+        raw_scores["distance_post"] = distances
     if out_csv_name:
         output_path = csv_path.with_name(out_csv_name)
     else:
@@ -697,26 +683,30 @@ if __name__ == "__main__":
         post_fill_metrics(
             dir_post_fill=args.dir_postfill,
             csv_name=args.csv_name,
+            sdf_name=args.sdf_name,
             pocket_pdb_dir=args.pocket_pdb_dir,
             compute_vina=args.compute_vina,
             vina_use_reflig_centroid=args.vina_use_reflig_centroid,
             compute_posecheck=args.compute_posecheck,
+            compute_diversity=args.compute_diversity,
             out_csv_name=args.out_csv_name,
             overwrite=args.overwrite,
         )
     else:
 
-        for pocket_dir in sorted(args.results_dir.iterdir()):
+        for idx, pocket_dir in enumerate(sorted(args.results_dir.iterdir())):
             if not pocket_dir.is_dir():
                 continue
-            print(f"[INFO] Processing pocket directory: {pocket_dir.name}")
+            print(f"[INFO] ========Processing {idx}th pocket directory: {pocket_dir.name}========")
             post_fill_metrics(
                 dir_post_fill=pocket_dir,
                 csv_name=args.csv_name,
+                sdf_name=args.sdf_name,
                 pocket_pdb_dir=args.pocket_pdb_dir,
                 compute_vina=args.compute_vina,
                 vina_use_reflig_centroid=args.vina_use_reflig_centroid,
                 compute_posecheck=args.compute_posecheck,
+                compute_diversity=args.compute_diversity,
                 out_csv_name=args.out_csv_name,
                 overwrite=args.overwrite,
             )
