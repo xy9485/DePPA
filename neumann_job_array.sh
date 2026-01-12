@@ -3,7 +3,7 @@
 # See `man sbatch` or https://slurm.schedmd.com/sbatch.html for descriptions of sbatch options.
 #SBATCH --job-name=sbdd_rl         # A nice readable name of your job, to see it in the queue
 
-#SBATCH --time=2-00          # Time limit hrs:min:sec
+#SBATCH --time=2-16         # Time limit hrs:min:sec
 #SBATCH --nodes=1                   # Number of nodes to request
 #SBATCH --cpus-per-task=32           # Number of CPUs to request
 #SBATCH --gpus=1                    # Number of GPUs to request
@@ -13,12 +13,19 @@
 #SBATCH --error=./slurm_files/slurm-%x-%A_%a.err
 #SBATCH --array=0-3
 
+# set -euo pipefail
+
+# Use a job-specific temp dir so module/conda init does not fail when /tmp is full on a node.
+# export TMPDIR="${HOME}/tmp/${SLURM_JOB_ID:-$$}"
+export TMPDIR="${HOME}/tmp"
+mkdir -p "$TMPDIR"
+# trap 'rm -rf "$TMPDIR"' EXIT
+
 module load mamba
 module load conda
 # Activate your environment, you have to create it first
 # mamba activate sbdd
 
-module load conda
 conda activate diffsbdd
 
 # export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -30,6 +37,12 @@ pocket_ranges=("0-25" "25-50" "50-75" "75-100")
 # pocket_ranges=("0-2" "25-27" "50-52" "75-77")
 
 pocket_range=${pocket_ranges[$SLURM_ARRAY_TASK_ID]}
+array_job_id=${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}
+# Track both the parent array job and the specific task for logging.
+job_tag="${array_job_id}"
+if [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+    job_tag="${job_tag}_${SLURM_ARRAY_TASK_ID}"
+fi
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt \
 #     --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test \
@@ -43,6 +56,6 @@ pocket_range=${pocket_ranges[$SLURM_ARRAY_TASK_ID]}
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --output_dir test3 --n_samples 32 --rollouts 3 --top_k 10 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range 
 
-python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --mode_num_nodes_lig sample --inference_interval 10 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --group_name_suffix _reprod2
+python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --mode_num_nodes_lig sample --inference_interval 10 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --w_qed 0.25 --w_sa 0.12 --w_vina_score 0.3 --w_distance 0.3 --w_strain 0.03 --slurm_job_tag ${job_tag} --group_name_suffix _vinaMin_posecheck
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 6 --top_k 20 --inference_interval 10 --kl_coeff_pretrain 0.0 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range --group_name_suffix _test

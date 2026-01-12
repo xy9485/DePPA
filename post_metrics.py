@@ -16,7 +16,7 @@ import numpy as np
 from rdkit import Chem, DataStructs
 from openbabel import pybel
 
-from analysis.eval_rmsd import get_rmsd_between_mol_pdbqt, get_rmsd_between_mols, get_mol_from_pdbqt_file, pdbqt_to_rdmol_openbabel
+from analysis.eval_rmsd import get_rmsd_between_mol_pdbqt, get_rmsd_between_mols, get_mol_from_pdbqt_file, pdbqt_to_rdmol_openbabel, pdbqt_block_to_rdmol_pybel
 
 
 DESIRED_OUTPUT_COLUMNS = [
@@ -33,6 +33,7 @@ DESIRED_OUTPUT_COLUMNS = [
     "vina_min",
     "vina_dock",
     "sc_rmsd",
+    "success_flag",
 ]
 
 # PoseCheck lives outside this repository, so fail early with a clear error if it is missing.
@@ -297,6 +298,117 @@ def _run_qvina(
 
     return score, symmetry_rmsd
 
+def _run_autodock_vina(
+    mol: Chem.Mol,
+    receptor_pdbqt: Path,
+    centroid: Tuple[float, float, float],
+    size: float,
+    exhaustiveness: int,
+    vina_mode: str = "vina_dock",
+    compute_rmsd: bool = False,
+):
+    from vina import Vina 
+    v = Vina(sf_name='vina')
+    score = np.nan
+    symmetry_rmsd = np.nan
+
+    with tempfile.TemporaryDirectory(prefix="qvina_temp_") as tmpdir:
+        lig_pdbqt = Path(tmpdir) / "ligand.pdbqt"
+        out_pdbqt = Path(tmpdir) / "ligand_out.pdbqt"
+        molblock = Chem.MolToMolBlock(mol, kekulize=False)
+        obmol = pybel.readstring("sdf", molblock)
+        obmol.write("pdbqt", str(lig_pdbqt), overwrite=True)
+    
+        v.set_receptor(str(receptor_pdbqt))
+        v.set_ligand_from_file(str(lig_pdbqt))
+        v.compute_vina_maps(center=centroid, box_size=[size, size, size])
+
+        if vina_mode == "vina_score":
+            score = v.score()[0]
+        if vina_mode == "vina_min":
+            score = v.optimize()[0]
+        if vina_mode == "vina_dock":
+            v.dock(exhaustiveness=exhaustiveness, n_poses=1)
+            score = v.energies(n_poses=1)[0][0] #corresponds to the first pose, fist column, which is total energy
+            if compute_rmsd:
+                pose_pdbqt_str = v.poses(n_poses=1)
+
+                docked_mol = pdbqt_block_to_rdmol_pybel(pose_pdbqt_str)
+                if docked_mol is None:
+                    raise ValueError("Failed to convert vina output PDBQT to RDMol.")
+                symmetry_rmsd = get_rmsd_between_mols(mol, docked_mol)
+                if np.isnan(symmetry_rmsd):
+                    raise ValueError("Failed to compute RMSD between input and docked molecule.")
+    return score, symmetry_rmsd
+
+def _calculate_autodockVina_metrics_for_molecules(
+    molecules: list[Chem.Mol | None],
+    receptor_pdbqt: Path,
+    size: float,
+    exhaustiveness: int,
+    fixed_centroid=None,
+) -> list[dict[str, float]]:
+
+    metrics: list[dict[str, float]] = []
+    for idx, mol in enumerate(molecules):
+        print(f"Vina Metrics, Processing molecule #{idx + 1} with size {mol.GetNumAtoms()} atoms.")
+        entry = {
+            "vina_dock": math.nan,
+            "sc_rmsd": math.nan,
+            "vina_min": math.nan,
+            "vina_score": math.nan,
+        }
+        if mol is None:
+            raise ValueError(f"Molecule #{idx + 1} is None; cannot compute vina metrics.")
+            # metrics.append(entry)
+            # continue
+
+        centroid = fixed_centroid or _ligand_centroid(mol)
+        if centroid is None:
+            raise ValueError(f"Unable to compute centroid for molecule #{idx + 1}.")
+            # metrics.append(entry)
+            # continue
+
+        vina_score, _ = _run_autodock_vina(
+            mol=mol,
+            receptor_pdbqt=receptor_pdbqt,
+            centroid=centroid,
+            size=size,
+            exhaustiveness=exhaustiveness,
+            vina_mode="vina_score",
+            compute_rmsd=False,
+        )
+        entry["vina_score"] = vina_score
+
+        vina_min_score, _ = _run_autodock_vina(
+            mol=mol,
+            receptor_pdbqt=receptor_pdbqt,
+            centroid=centroid,
+            size=size,
+            exhaustiveness=exhaustiveness,
+            vina_mode="vina_min",
+            compute_rmsd=False,
+        )
+        entry["vina_min"] = vina_min_score
+
+        vina_dock_score, sc_rmsd = _run_autodock_vina(
+            mol=mol,
+            receptor_pdbqt=receptor_pdbqt,
+            centroid=centroid,
+            size=size,
+            exhaustiveness=exhaustiveness,
+            vina_mode="vina_dock",
+            compute_rmsd=True,
+        )
+        entry["vina_dock"] = vina_dock_score
+        entry["sc_rmsd"] = sc_rmsd
+
+        
+        print(f"sc_rmsd: {entry['sc_rmsd']}, vina_dock: {entry['vina_dock']}, vina_min: {entry['vina_min']}, vina_score: {entry['vina_score']}")
+
+        metrics.append(entry)
+
+    return metrics
 
 def _calculate_vina_metrics_for_molecules(
     molecules: List[Optional[Chem.Mol]],
@@ -558,7 +670,19 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def post_fill_metrics(dir_post_fill: Path, csv_name: str, sdf_name: str=None, pocket_pdb_dir: Path=None, compute_vina: bool=True, vina_use_reflig_centroid: bool=True, compute_posecheck: bool=True, compute_diversity: bool=True, out_csv_name: str=None, overwrite: bool=False) -> None:
+def post_fill_metrics(
+        dir_post_fill: Path,
+        csv_name: str,
+        sdf_name: str=None,
+        pocket_pdb_dir: Path=None,
+        compute_vina: bool=True,
+        vina_use_reflig_centroid: bool=True,
+        compute_posecheck: bool=True,
+        compute_diversity: bool=True,
+        compute_success_rate: bool=True,
+        out_csv_name: str=None,
+        overwrite: bool=False
+        ) -> None:
 
     csv_path: Path = dir_post_fill / csv_name
     # assert csv_path.name.endswith("_scores.csv")
@@ -606,18 +730,19 @@ def post_fill_metrics(dir_post_fill: Path, csv_name: str, sdf_name: str=None, po
             exhaustiveness=16,
             fixed_centroid=reference_centroid,
         )
-        raw_scores["vina_dock"] = [
-            entry.get("vina_dock", math.nan) for entry in vina_metrics
-        ]
-        raw_scores["sc_rmsd"] = [
-            entry.get("sc_rmsd", math.nan) for entry in vina_metrics
-        ]
-        raw_scores["vina_min"] = [
-            entry.get("vina_min", math.nan) for entry in vina_metrics
-        ]
-        raw_scores["vina_score"] = [
-            entry.get("vina_score", math.nan) for entry in vina_metrics
-        ]
+        # using Autodock Vina
+        # print("[Vina] Start Running Autodock Vina metrics...")
+        # vina_metrics = _calculate_autodockVina_metrics_for_molecules(
+        #     molecules=molecules,
+        #     receptor_pdbqt=receptor_path_pdbqt,
+        #     size=20.0,
+        #     exhaustiveness=16,
+        #     fixed_centroid=reference_centroid,
+        # )
+        raw_scores['vina_dock'] =[entry['vina_dock'] for entry in vina_metrics]
+        raw_scores["sc_rmsd"] = [entry['sc_rmsd'] for entry in vina_metrics]
+        raw_scores["vina_min"] = [entry['vina_min'] for entry in vina_metrics]
+        raw_scores["vina_score"] = [entry['vina_score'] for entry in vina_metrics]
 
     if compute_posecheck:
         # receptor_path_pdb = _locate_receptor_pdb(pocket_name, pocket_pdb_dir)
@@ -643,6 +768,21 @@ def post_fill_metrics(dir_post_fill: Path, csv_name: str, sdf_name: str=None, po
         distances = _compute_diversity_for_mol_list(molecules)
         assert len(distances) == len(molecules)
         raw_scores["distance_post"] = distances
+
+    if compute_success_rate:
+        print("[Success Rate] Start Computing success rate metrics...")
+        success_flags = []
+        for idx, row in raw_scores.iterrows():
+            if abs(row["vina_dock"]) > 8.18 and abs(row["qed"])> 0.25 and abs(row["sa"]) > 0.59:
+                success_flags.append(1)
+            else:
+                success_flags.append(0)
+        print(f"success_flags: {success_flags}")
+        raw_scores["success_flag"] = success_flags
+
+    # raw_scores is a dataframe, ensure the values in raw_scores have maximum four decimal places
+    raw_scores = raw_scores.round(6)
+
     if out_csv_name:
         output_path = csv_path.with_name(out_csv_name)
     else:

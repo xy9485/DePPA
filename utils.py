@@ -77,10 +77,13 @@ def write_sdf_file(sdf_path, molecules):
     #        w.write(mol)
 
     w = Chem.SDWriter(str(sdf_path))
-    w.SetKekulize(False)
     for m in molecules:
-        if m is not None:
-            w.write(m)
+        w.write(m)
+    # w.SetKekulize(False)
+    # for m in molecules:
+    #     if m is not None:
+    #         w.write(m)
+        
 
     # print(f'Wrote SDF file to {sdf_path}')
 

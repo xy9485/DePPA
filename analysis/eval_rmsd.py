@@ -8,6 +8,7 @@ from spyrmsd import rmsd as spy_rmsd
 import torch
 import argparse
 from openbabel import openbabel as ob
+from openbabel import pybel
 import os
 from rdkit import Chem
 import numpy as np
@@ -59,6 +60,79 @@ def get_pdbqt_mol(pdbqt_block: str) -> Chem.Mol:
 
     return mol
 
+def get_mol_from_pdbqt_file(pdbqt_path: str) -> Chem.Mol:
+    """
+    Read a .pdbqt file and convert it to an RDKit Mol via Open Babel.
+    Converts PDBQT $\rightarrow$ PDB $\rightarrow$ RDMol.
+    """
+    obmol = ob.OBMol()
+    obConversion = ob.OBConversion()
+    obConversion.SetInAndOutFormats("pdbqt", "pdb")
+
+    if not obConversion.ReadFile(obmol, pdbqt_path):
+        raise ValueError(f"Failed to read PDBQT file: {pdbqt_path}")
+
+    pdb_block = obConversion.WriteString(obmol)
+    # mol = Chem.MolFromPDBBlock(pdb_block)
+    mol = Chem.MolFromPDBBlock(pdb_block, sanitize=False)
+    # mol = Chem.MolFromPDBBlock(pdb_block, removeHs=False)
+    return mol
+
+def pdbqt_to_rdmol_openbabel(pdbqt_file):
+    """
+    Uses OpenBabel to read a PDBQT and return the best pose as an RDMol.
+    Converts PDBQT $\rightarrow$ MDL Mol (SDF) $\rightarrow$ RDMol.
+    """
+    # Read the file using pybel (pdbqt format)
+    # pybel.readfile returns an iterator of molecules
+    mols = list(pybel.readfile("pdbqt", pdbqt_file))
+    
+    if not mols:
+        return None
+    
+    # The first molecule in the list is the best pose (Pose 1)
+    best_pose = mols[0]
+    
+    # Convert OpenBabel molecule to an RDKit molecule
+    # We use the 'mol' (MDL Molfile) format as a bridge to preserve bond orders
+    mol_block = best_pose.write("mol")
+    # rdmol = Chem.MolFromMolBlock(mol_block, removeHs=False)
+    rdmol = Chem.MolFromMolBlock(mol_block)
+    return rdmol
+
+def pdbqt_block_to_rdmol_openbabel(pdbqt_block: str):
+    """
+    OpenBabel conversion of an in-memory PDBQT block to an RDKit Mol.
+    Mirrors pdbqt_to_rdmol_openbabel but accepts a PDBQT string instead of a file path.
+    """
+    obmol = ob.OBMol()
+    obConversion = ob.OBConversion()
+    obConversion.SetInAndOutFormats("pdbqt", "mol")
+
+    if not obConversion.ReadString(obmol, pdbqt_block):
+        return None
+
+    mol_block = obConversion.WriteString(obmol)
+    rdmol = Chem.MolFromMolBlock(mol_block)
+    return rdmol
+
+def pdbqt_block_to_rdmol_pybel(pdbqt_block: str):
+    """
+    OpenBabel conversion of an in-memory PDBQT block to an RDKit Mol.
+    Mirrors pdbqt_to_rdmol_openbabel but accepts a PDBQT string instead of a file path.
+    """
+    try:
+        # pybel.readstring can parse an in-memory PDBQT string similarly to readfile on disk
+        obmol = pybel.readstring("pdbqt", pdbqt_block)
+    except Exception:
+        return None
+
+    if obmol is None:
+        return None
+
+    mol_block = obmol.write("mol")
+    rdmol = Chem.MolFromMolBlock(mol_block)
+    return rdmol
 
 def get_rmsd_between_mols(mol, docked_mol):
     if mol is None or docked_mol is None:
@@ -77,7 +151,8 @@ def get_rmsd_between_mol_pdbqt(mol, docked_pdbqt):
     try:
         docked_mol = get_pdbqt_mol(docked_pdbqt)
         return get_rmsd_between_mols(mol, docked_mol)
-    except:
+    except Exception as e:
+        print("Exception in get_rmsd_between_mol_pdbqt:", e)
         return np.nan
 
 

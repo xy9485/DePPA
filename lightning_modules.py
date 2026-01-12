@@ -1365,7 +1365,7 @@ class LigandPocketDDPM(pl.LightningModule):
             # episodic_metrics["qed"] = analyze_out['QED']
             # episodic_metrics["sa"] = analyze_out['SA']
             # episodic_metrics["logp"] = analyze_out['LogP']
-            episodic_metrics['diveristy'] = analyze_out['Diversity']
+            episodic_metrics['diversity'] = analyze_out['Diversity']
             episodic_metrics["Diversity"] = analyze_out['Diversity']
             episodic_metrics["Validity"] = analyze_out['Validity']
             episodic_metrics["Connectivity"] = analyze_out['Connectivity']

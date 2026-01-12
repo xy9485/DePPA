@@ -80,6 +80,19 @@ def parse_args():
     )
     parser.add_argument("--wandb_mode", type=str, choices=("online", "offline", "disabled"), default="online", help="wandb mode.")
     parser.add_argument("--group_name_suffix", type=str, default="", help="Suffix to append to the wandb group name.")
+    parser.add_argument("--slurm_job_tag", type=str, default="", help="Tag to identify the SLURM job, appended to wandb group name.")
+    parser.add_argument("--w_qed", type=float, default=0.27, help="Weight for qed in the reward function.")
+    parser.add_argument("--w_sa", type=float, default=0.13, help="Weight for sa in the reward function.")
+    parser.add_argument("--w_vina_score", type=float, default=0.3, help="Weight for vina_score in the reward function.")
+    parser.add_argument("--w_distance", type=float, default=0.3, help="Weight for distance in the reward function.")
+    parser.add_argument("--w_strain", type=float, default=0.0, help="Weight for strain in the reward function.")
+    parser.add_argument(
+        "--vina_center_xyz_mode",
+        type=str,
+        choices=("lig", "ref"),
+        default="ref",
+        help="Docking box center: generated ligand center ('lig') or reference ligand center ('ref').",
+    )
     return parser.parse_args()
 
 
@@ -324,6 +337,7 @@ def main():
     for pocket_idx, (base, pdb_file, receptor_file, ref_ligand, pocket_ids) in enumerate(pockets):
         print(f"Processing {base}...Pocket {pocket_idx + 1}...Total Pockets: {len(pockets)}")
         coords, mean_coord, ligand_size = load_reference_ligand(ref_ligand, pdb_file)
+        vina_center_xyz = None if args.vina_center_xyz_mode == "lig" else mean_coord
         # num_nodes_lig = args.num_nodes_lig or ligand_size
         if args.mode_num_nodes_lig == 'align_reference_ligand':
             num_nodes_lig = torch.ones(args.n_samples, dtype=int) * ligand_size
@@ -339,18 +353,18 @@ def main():
             "sa": model.molecule_properties.calculate_sa,
             "vina_score": partial(
                 model.molecule_properties.calculate_docking_score,
-                center_xyz=mean_coord,
+                center_xyz=vina_center_xyz,
                 receptor_pdbqt_file=str(receptor_file),
                 use_meeko=False,
                 vina_mode='vina_score',
             ),
-            # "vina_min": partial(
-            #     model.molecule_properties.calculate_docking_score,
-            #     center_xyz=mean_coord,
-            #     receptor_pdbqt_file=str(receptor_file),
-            #     use_meeko=False,
-            #     vina_mode='vina_min',
-            # ),
+            "vina_min": partial(
+                model.molecule_properties.calculate_docking_score,
+                center_xyz=vina_center_xyz,
+                receptor_pdbqt_file=str(receptor_file),
+                use_meeko=False,
+                vina_mode='vina_min',
+            ),
             # "vina_dock": partial(
             #     model.molecule_properties.calculate_docking_score,
             #     center_xyz=mean_coord,
@@ -373,11 +387,11 @@ def main():
             #             ),
         }
         reward_weights={
-                "qed": 0.27,
-                "sa": 0.13,
-                "vina_score": 0.3,
-                "distance": 0.3,
-                # "strain": 0.05
+                "qed": args.w_qed,
+                "sa": args.w_sa,
+                "vina_score": args.w_vina_score,
+                "distance": args.w_distance,
+                "strain": args.w_strain
             }
         ppo_config = SimpleNamespace(
             clip_range=args.clip_range,
@@ -407,7 +421,7 @@ def main():
             project="DiffSBDD-PPO",
             mode=args.wandb_mode,
             group=group_name,
-            name=" "+Path(pdb_file).stem[:4],
+            name=f"{Path(pdb_file).stem[:4]}-{args.slurm_job_tag}",
             config=vars(ppo_config),
         )
         wandb_logger = LoggerWandb()

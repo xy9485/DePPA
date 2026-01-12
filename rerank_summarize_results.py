@@ -28,6 +28,8 @@ METRIC_FIELDS = [
 ]
 
 RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5} # from paper MolJO
+# RERANK_WEIGHTS = {"vina_score": 0.27, "qed": 0.13, "sa": 0.3, "distance": 0.3}
+# RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 3.0} 
 # RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5, "distance": 1.0}
 # RERANK_WEIGHTS = {"qed": 0.27, "sa": 0.13, "vina_score": 0.3, "distance": 0.3} 
 # RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5, "strain": 1.5} 
@@ -72,6 +74,11 @@ def parse_args():
             "How many entries to keep per pocket when computing top scores "
         ),
     )
+    parser.add_argument(
+        "--no_rank",
+        action="store_true",
+        help="If set, do not rerank; just select the top N raw entries.",
+    )
 
     parser.add_argument(
         "--summarize_over_all_pockets",
@@ -79,6 +86,8 @@ def parse_args():
         help="Whether to summarize over all pockets into a single CSV.",
         )
     return parser.parse_args()
+
+args = argparse.Namespace(csv_name="raw.csv", sdf_name="raw.sdf", top_n=10)
 
 
 def safe_float(value):
@@ -196,7 +205,7 @@ def zscore_rerank_csv_sdf_given_dir(search_dir: Path, csv_name: str, sdf_name: s
     with csv_path.open("r", newline="") as handle:
         csv_reader = csv.DictReader(handle)
         rows = list(csv_reader)
-    assert len(rows) == len(molecules)
+    assert len(rows) == len(molecules), f"len(rows) is {len(rows)} but len(molecules) is {len(molecules)}"
 
     for field in weights:
         assert field in csv_reader.fieldnames, f"Field '{field}' not in weights."
@@ -246,6 +255,44 @@ def zscore_rerank_csv_sdf_given_dir(search_dir: Path, csv_name: str, sdf_name: s
             writer.writerow(row)
 
     top_sdf_path = search_dir / f"rerank_top{top_n}_{weights_str}.sdf"
+    with Chem.SDWriter(str(top_sdf_path)) as sdf_writer:
+        for mol in top_molecules:
+            sdf_writer.write(mol)
+
+    return top_csv_path, top_sdf_path
+
+def select_topN(pocket_dir: Path, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n) -> list[Path]:
+    csv_path = (pocket_dir / csv_name).resolve()
+    sdf_path = (pocket_dir / sdf_name).resolve()
+
+    with csv_path.open("r", newline="") as handle:
+        csv_reader = csv.DictReader(handle)
+        rows = list(csv_reader)
+
+    supplier = Chem.SDMolSupplier(str(sdf_path))
+    molecules = [mol for mol in supplier]
+
+    if not rows:
+        raise SystemExit(f"'{csv_path}' is empty; cannot select entries.")
+    if len(rows) != len(molecules):
+        raise SystemExit(
+            f"len(rows) is {len(rows)} but len(molecules) is {len(molecules)}"
+        )
+
+    top_rows = rows[-top_n:] if top_n > 0 else rows
+    top_molecules = molecules[-top_n:] if top_n > 0 else molecules
+
+    fieldnames = list(csv_reader.fieldnames or rows[0].keys())
+    top_csv_path = pocket_dir / f"raw_last{top_n}.csv"
+    with top_csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=fieldnames, extrasaction="ignore"
+        )
+        writer.writeheader()
+        for row in top_rows:
+            writer.writerow(row)
+
+    top_sdf_path = pocket_dir / f"raw_last{top_n}.sdf"
     with Chem.SDWriter(str(top_sdf_path)) as sdf_writer:
         for mol in top_molecules:
             sdf_writer.write(mol)
@@ -322,8 +369,11 @@ if __name__ == "__main__":
         print(f"======Processing {pocket_dir_idx}th pocket directory: {pocket_dir}======")
         if not pocket_dir.is_dir():
             continue
-        rerank_top_csv, rerank_top_sdf = zscore_rerank_csv_sdf_given_dir(pocket_dir, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n, weights=RERANK_WEIGHTS)
-        rerank_top_csv_files.append(rerank_top_csv)
+        if args.no_rank:
+            raw_lastN_csv, raw_lastN_sdf = select_topN(pocket_dir, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n)
+        else:
+            rerank_top_csv, rerank_top_sdf = zscore_rerank_csv_sdf_given_dir(pocket_dir, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n, weights=RERANK_WEIGHTS)
+            rerank_top_csv_files.append(rerank_top_csv)
 
     if args.summarize_over_all_pockets:
         weights_str = "_".join([f"{k}{v}" for k, v in RERANK_WEIGHTS.items()])

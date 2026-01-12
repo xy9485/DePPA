@@ -259,7 +259,10 @@ class MoleculeProperties:
         # center box at ligand's center of mass
 
         # cx, cy, cz = ligand_mol.GetConformer().GetPositions().mean(0)
-        cx, cy, cz = center_xyz
+        if center_xyz is None:
+            cx, cy, cz = ligand_mol.GetConformer().GetPositions().mean(0)
+        else:
+            cx, cy, cz = center_xyz
         try:
             # Use a unique temp directory per call to avoid collisions when
             # called concurrently from multiple threads/processes.
