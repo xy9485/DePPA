@@ -33,6 +33,7 @@ DESIRED_OUTPUT_COLUMNS = [
     "vina_min",
     "vina_dock",
     "sc_rmsd",
+    # "sc_rmsd_2A",
     "success_flag",
 ]
 
@@ -614,7 +615,7 @@ def _parse_args() -> argparse.Namespace:
     #     default=16,
     #     help="qvina2 exhaustiveness level for RMSD docking (default: 16).",
     # )
-    parser.set_defaults(compute_posecheck=True, compute_vina=True, compute_diversity=True)
+    parser.set_defaults(compute_posecheck=True)
     parser.add_argument(
         "--compute_posecheck",
         dest="compute_posecheck",
@@ -627,6 +628,7 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable PoseCheck strain/clash metrics.",
     )
+    parser.set_defaults(compute_vina=True)
     parser.add_argument(
         "--compute_vina",
         dest="compute_vina",
@@ -639,6 +641,7 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable qvina2-derived metrics.",
     )
+    parser.set_defaults(compute_diversity=True)
     parser.add_argument(
         "--compute_diversity",
         dest="compute_diversity",
@@ -667,6 +670,32 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable using the reference ligand centroid for docking calculations.",
     )
+    parser.set_defaults(compute_success_rate=True)
+    parser.add_argument(
+        "--compute_success_rate",
+        dest="compute_success_rate",
+        action="store_true",
+        help="Compute success rate metrics (default: enabled).",
+    )
+    parser.add_argument(
+        "--skip_success_rate",
+        dest="compute_success_rate",
+        action="store_false",
+        help="Disable success rate metrics.",
+    )
+    parser.set_defaults(compute_sc_rmsd_twoA=False)
+    parser.add_argument(
+        "--compute_sc_rmsd_twoA",
+        dest="compute_sc_rmsd_twoA",
+        action="store_true",
+        help="Compute sc_rmsd < 2Å metrics (default: enabled).",
+    )
+    parser.add_argument(
+        "--skip_sc_rmsd_twoA",
+        dest="compute_sc_rmsd_twoA",
+        action="store_false",
+        help="Disable sc_rmsd < 2Å metrics.",
+    )
     return parser.parse_args()
 
 
@@ -680,6 +709,7 @@ def post_fill_metrics(
         compute_posecheck: bool=True,
         compute_diversity: bool=True,
         compute_success_rate: bool=True,
+        compute_sc_rmsd_twoA: bool=True,
         out_csv_name: str=None,
         overwrite: bool=False
         ) -> None:
@@ -739,10 +769,27 @@ def post_fill_metrics(
         #     exhaustiveness=16,
         #     fixed_centroid=reference_centroid,
         # )
-        raw_scores['vina_dock'] =[entry['vina_dock'] for entry in vina_metrics]
-        raw_scores["sc_rmsd"] = [entry['sc_rmsd'] for entry in vina_metrics]
-        raw_scores["vina_min"] = [entry['vina_min'] for entry in vina_metrics]
-        raw_scores["vina_score"] = [entry['vina_score'] for entry in vina_metrics]
+        raw_scores["vina_dock"] = [entry.get("vina_dock", math.nan) for entry in vina_metrics]
+        raw_scores["sc_rmsd"] = [entry.get("sc_rmsd", math.nan) for entry in vina_metrics]
+        raw_scores["vina_min"] = [entry.get("vina_min", math.nan) for entry in vina_metrics]
+        raw_scores["vina_score"] = [entry.get("vina_score", math.nan) for entry in vina_metrics]
+
+        # raw_scores['vina_dock'] =[entry['vina_dock'] for entry in vina_metrics]
+        # raw_scores["sc_rmsd"] = [entry['sc_rmsd'] for entry in vina_metrics]
+        # raw_scores["vina_min"] = [entry['vina_min'] for entry in vina_metrics]
+        # raw_scores["vina_score"] = [entry['vina_score'] for entry in vina_metrics]
+    if compute_sc_rmsd_twoA:
+        print("[sc_rmsd<2A] Start Computing sc_rmsd<2A metrics...")
+        sc_rmsd_lower_than_twoA_flags = []
+        for idx, row in raw_scores.iterrows():
+            if np.isnan(row["sc_rmsd"]):
+                sc_rmsd_lower_than_twoA_flags.append(np.nan)
+            elif abs(row["sc_rmsd"]) < 2.0:
+                sc_rmsd_lower_than_twoA_flags.append(1)
+            else:
+                sc_rmsd_lower_than_twoA_flags.append(0)
+        print(f"sc_rmsd_lower_than_twoA_flags: {sc_rmsd_lower_than_twoA_flags}")
+        raw_scores["sc_rmsd_2A"] = sc_rmsd_lower_than_twoA_flags
 
     if compute_posecheck:
         # receptor_path_pdb = _locate_receptor_pdb(pocket_name, pocket_pdb_dir)
@@ -803,6 +850,10 @@ def post_fill_metrics(
             existing_scores["vina_min"] = raw_scores["vina_min"]
             existing_scores["vina_dock"] = raw_scores["vina_dock"]
             existing_scores["sc_rmsd"] = raw_scores["sc_rmsd"]
+        if compute_success_rate:
+            existing_scores["success_flag"] = raw_scores["success_flag"]
+        if compute_sc_rmsd_twoA:
+            existing_scores["sc_rmsd_2A"] = raw_scores["sc_rmsd_2A"]
         existing_scores = _ensure_metric_column_order(existing_scores)
         existing_scores.to_csv(output_path, index=False)
     else:
@@ -829,6 +880,8 @@ if __name__ == "__main__":
             vina_use_reflig_centroid=args.vina_use_reflig_centroid,
             compute_posecheck=args.compute_posecheck,
             compute_diversity=args.compute_diversity,
+            compute_success_rate=args.compute_success_rate,
+            compute_sc_rmsd_twoA=args.compute_sc_rmsd_twoA,
             out_csv_name=args.out_csv_name,
             overwrite=args.overwrite,
         )
@@ -847,6 +900,8 @@ if __name__ == "__main__":
                 vina_use_reflig_centroid=args.vina_use_reflig_centroid,
                 compute_posecheck=args.compute_posecheck,
                 compute_diversity=args.compute_diversity,
+                compute_success_rate=args.compute_success_rate,
+                compute_sc_rmsd_twoA=args.compute_sc_rmsd_twoA,
                 out_csv_name=args.out_csv_name,
                 overwrite=args.overwrite,
             )

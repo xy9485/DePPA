@@ -53,6 +53,42 @@ def safe_median(values):
     return round(float(statistics.median(filtered)), 6)
 
 
+def compute_mean_for_single_metric_per_pocket(csv_path: Path, target_field: str, top_percentile_per_pocket: float=1.0, reverse_sort: bool=False) -> dict:
+    """this function targets to compute the mean for a single specified field
+
+
+    Args:
+        csv_path (Path): _description_
+        target_field (str): the
+        top_percentile_per_pocket (float, optional): _description_. Defaults to 1.0.
+        reverse_sort (bool, optional): Consider the values are passed to abs() before sorting. If True, sort in descending order. Defaults to False.
+
+    Returns:
+        dict: _description_
+    """
+    with csv_path.open("r", newline="") as handle:
+        csv_reader = csv.DictReader(handle)
+        rows = list(csv_reader)
+    summary = {}
+    # compute mean for each field in csv
+    for field in csv_reader.fieldnames:
+        if field == target_field:
+            if top_percentile_per_pocket < 1.0:
+                top_n_rows_to_consider = int(len(rows) * top_percentile_per_pocket)
+                sorted_rows = sorted(
+                    rows,
+                    key=lambda row: abs(safe_float(row.get(field))),
+                    reverse=reverse_sort
+                )[:top_n_rows_to_consider]
+                selected_rows = sorted_rows
+                summary[field] = safe_mean([safe_float(row.get(field)) for row in selected_rows])
+            else:
+                selected_rows = rows
+                summary[field] = safe_mean([safe_float(row.get(field)) for row in selected_rows])
+
+    summary.update({"pocket": csv_path.parent.name, "count": len(selected_rows)})
+    return summary
+
 def get_mean_scores(csv_path: Path) -> dict:
     with csv_path.open("r", newline="") as handle:
         csv_reader = csv.DictReader(handle)
@@ -88,8 +124,39 @@ def summarize_over_csv_files(csv_files, save_path, fields) -> None:
         f"Wrote statistics for {len(pocket_summaries)} pockets to {save_path}."
     )
 
+def overall_mean_singleMetric_perPocket(csv_files, save_path, target_field, top_percentile_per_pocket, reverse_sort=False) -> None:
+    """
+    This version uses csv.DictWriter.
+    Aggregate per-pocket summaries and an overall mean row.
+    """
+    if not csv_files:
+        raise SystemExit("No CSV files provided for summarization.")
 
-def summarize_mean_perPocket_overall(csv_files, save_path, fields) -> None:
+    pocket_summaries = [
+        compute_mean_for_single_metric_per_pocket(
+            path,
+            target_field,
+            top_percentile_per_pocket,
+            reverse_sort
+        )
+        for path in csv_files
+    ]
+    header = ["pocket", "count", target_field]
+
+    # Compute the OVERALL row by averaging each metric across pockets.
+    overall_row = {"pocket": "OVERALL", "count": None}
+    values = [summary[target_field] for summary in pocket_summaries]
+    overall_row[target_field] = safe_mean(values)
+
+    with save_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=header, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerow(overall_row)
+        writer.writerows(pocket_summaries)
+
+    print(f"Wrote statistics for {len(pocket_summaries)} pockets to {save_path}.")
+
+def overall_mean_perPocket(csv_files, save_path, fields) -> None:
     """
     This version uses csv.DictWriter.
     Aggregate per-pocket summaries and an overall mean row.
@@ -184,6 +251,41 @@ def summarize_mean_over_csv_files(csv_files, save_path, fields) -> None:
     )
 
 
+def compute_percentile_given_threshold(csv_files, target_field, threshold) -> float:
+    """Compute the percentile of values below a given threshold across all CSV files.
+
+    Args:
+        csv_files (list of Path): List of CSV file paths.
+        target_field (str): The field to analyze.
+        threshold (float): The threshold value.
+
+    Returns:
+        float: The percentile of values below the threshold.
+    """
+    all_values = []
+    in_valid_count = 0
+    for csv_path in csv_files:
+        with csv_path.open("r", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row_idx, row in enumerate(reader):
+                value = safe_float(row.get(target_field))
+                if value is not None:
+                    all_values.append(value)
+                else:
+                    print(f"Invalid value for field '{target_field}' in file '{csv_path}', row {row_idx + 1}: {row.get(target_field)}")
+                    in_valid_count += 1
+    print(f"Total valid values for field '{target_field}': {len(all_values)}")
+    print(f"Total invalid values for field '{target_field}': {in_valid_count}")
+    if not all_values:
+        return 0.0
+
+    count_below_threshold = sum(1 for v in all_values if v < threshold)
+    percentile = (count_below_threshold / len(all_values)) * 100.0
+    percentile = round(percentile, 1)
+    print(f"Values below threshold {threshold}: {count_below_threshold}")
+    print(f"Percentile of values below {threshold}: {percentile}%")
+    return percentile
+
 if __name__ == "__main__":
     METRIC_FIELDS = [
         "num_atoms",
@@ -212,18 +314,35 @@ if __name__ == "__main__":
                 raise SystemExit(f"CSV file {rerank_csv_path} does not exist.")
             rerank_csv_files.append(rerank_csv_path)
 
-    # summarize_mean_perPocket_overall(
+    # top_percentile_per_pocket = 0.25
+    # target_field = "strain"
+    # overall_mean_singleMetric_perPocket(
+    #     rerank_csv_files,
+    #     save_path=args.results_dir / f"summary_{target_field}_top{int(top_percentile_per_pocket*100)}pct_over_{args.csv_name}",
+    #     target_field=target_field,
+    #     top_percentile_per_pocket=top_percentile_per_pocket,
+    #     reverse_sort=False
+    # )
+    # overall_mean_perPocket(
+    #     rerank_csv_files,
+    #     save_path=args.results_dir / f"summary_mean_over_{args.csv_name}",
+    #     fields=METRIC_FIELDS,
+    # )
+    # summarize_mean_over_csv_files(
     #     rerank_csv_files,
     #     args.results_dir / f"summary_mean_over_{args.csv_name}",
     #     fields=METRIC_FIELDS
     # )
-    summarize_mean_over_csv_files(
+    # summarize_med_over_csv_files(
+    #     rerank_csv_files,
+    #     args.results_dir / f"summary_med_over_{args.csv_name}",
+    #     fields=METRIC_FIELDS
+    # )
+
+    percentile_threshold = 2.0
+    target_field = "sc_rmsd"
+    percentile = compute_percentile_given_threshold(
         rerank_csv_files,
-        args.results_dir / f"summary_mean_over_{args.csv_name}",
-        fields=METRIC_FIELDS
-    )
-    summarize_med_over_csv_files(
-        rerank_csv_files,
-        args.results_dir / f"summary_med_over_{args.csv_name}",
-        fields=METRIC_FIELDS
+        target_field=target_field,
+        threshold=percentile_threshold
     )
