@@ -562,12 +562,24 @@ class ConditionalDDPM(EnVariationalDiffusion):
         log_prob_batch = scatter_add(log_prob_node, ligand_mask, dim=0)
         n_atoms = scatter_add(torch.ones_like(log_prob_node), ligand_mask, dim=0)
         log_prob = log_prob_batch / n_atoms
+        # log_prob = torch.nan_to_num(log_prob, nan=0.0)
+
+        # Attention: when num_nodes_lig is sampled conditioned on pocket size, ligand_mask will skip certain indice
+        # e.g. num_nodes_lig = [3,0,5], ligand_mask = [0,0,0,2,2,2,2,2], meaning only two ligands are actually to be sampled
+        # the shape of log_prob_batch and n_atoms will be (3,), with one zero entry corresponding to the skipped ligand
+        # we need to filter out these zero entries before normalizing log_prob by n_atoms to avoid NaN values, so that the shape of log_prob aligns with that of advantages
+        # log_prob_batch = log_prob_batch[log_prob_batch!=0]
+        # n_atoms = n_atoms[n_atoms!=0]
+        # log_prob = log_prob_batch / n_atoms
 
         # Entropy (same scalar per feature, sum over features, normalize)
         entropy_feat = 0.5 + 0.5 * math.log(2 * math.pi) + torch.log(sigma_lig)
         entropy_node = entropy_feat.sum(dim=1)
         entropy_batch = scatter_add(entropy_node, ligand_mask, dim=0) / n_atoms
+        # entropy_batch = torch.nan_to_num(entropy_batch, nan=0.0)
 
+        # entropy_batch = scatter_add(entropy_node, ligand_mask, dim=0)
+        # entropy_batch = entropy_batch[entropy_batch!=0] / n_atoms
         return {
             "action": action,
             "mu": mu_lig,
