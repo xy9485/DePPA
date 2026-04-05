@@ -33,8 +33,9 @@ DESIRED_OUTPUT_COLUMNS = [
     "vina_min",
     "vina_dock",
     "sc_rmsd",
-    # "sc_rmsd_2A",
+    "sc_rmsd_2A",
     "success_flag",
+    "hit_rate_flag",
 ]
 
 # PoseCheck lives outside this repository, so fail early with a clear error if it is missing.
@@ -292,10 +293,14 @@ def _run_qvina(
                     # symmetry_rmsd = get_rmsd_between_mol_pdbqt(mol, str(out_pdbqt))
                     docked_mol = pdbqt_to_rdmol_openbabel(str(out_pdbqt))
                     # docked_mol = get_mol_from_pdbqt_file(str(out_pdbqt))
-                    if docked_mol is None:
-                        raise ValueError("Failed to convert qvina output PDBQT to RDMol.")
+                    # if docked_mol is None:
+                    #     raise ValueError("Failed to convert qvina output PDBQT to RDMol.")
                 # docked_mol_aligned = Chem.AllChem.AssignBondOrdersFromTemplate(mol, docked_mol)
-                symmetry_rmsd = get_rmsd_between_mols(mol, docked_mol)
+                if docked_mol is None:
+                    symmetry_rmsd = np.nan
+                else:
+                    # symmetry_rmsd still possible to be np.nan
+                    symmetry_rmsd = get_rmsd_between_mols(mol, docked_mol)
 
     return score, symmetry_rmsd
 
@@ -562,6 +567,12 @@ def _parse_args() -> argparse.Namespace:
         help="Directory that contain subdirectorys that contain results for each pocket.",
     )
     parser.add_argument(
+        "--dir_range",
+        type=str,
+        default=None,
+        help = "An idx range that specifies which subdirectories under --results_dir to process, e.g., 0-10, 5-, or 7",
+    )
+    parser.add_argument(
         "--dir_postfill",
         type=Path,
         help="search for raw.sdf and raw_scores.csv under this folder",
@@ -654,7 +665,7 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable molecular diversity metrics.",
     )
-    parser.set_defaults(vina_use_reflig_centroid=True)
+    parser.set_defaults(vina_use_reflig_centroid=False)
     parser.add_argument(
         "--vina_use_reflig_centroid",
         dest="vina_use_reflig_centroid",
@@ -683,7 +694,7 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable success rate metrics.",
     )
-    parser.set_defaults(compute_sc_rmsd_twoA=False)
+    parser.set_defaults(compute_sc_rmsd_twoA=True)
     parser.add_argument(
         "--compute_sc_rmsd_twoA",
         dest="compute_sc_rmsd_twoA",
@@ -757,7 +768,7 @@ def post_fill_metrics(
             molecules=molecules,
             receptor_pdbqt=receptor_path_pdbqt,
             size=20.0,
-            exhaustiveness=16,
+            exhaustiveness=8,
             fixed_centroid=reference_centroid,
         )
         # using Autodock Vina
@@ -819,13 +830,25 @@ def post_fill_metrics(
     if compute_success_rate:
         print("[Success Rate] Start Computing success rate metrics...")
         success_flags = []
+        hit_rate_flags = []
         for idx, row in raw_scores.iterrows():
+            if np.isnan(row["vina_dock"]) or math.isnan(row["vina_dock"]):
+                success_flags.append(np.nan)
+                hit_rate_flags.append(np.nan)
+                continue
             if abs(row["vina_dock"]) > 8.18 and abs(row["qed"])> 0.25 and abs(row["sa"]) > 0.59:
                 success_flags.append(1)
             else:
                 success_flags.append(0)
+
+            if abs(row["vina_dock"]) > 8.18 and abs(row["qed"])> 0.4 and abs(row["sa"]) > 0.5:
+                hit_rate_flags.append(1)
+            else:
+                hit_rate_flags.append(0)
         print(f"success_flags: {success_flags}")
+        print(f"hit_rate_flags: {hit_rate_flags}")
         raw_scores["success_flag"] = success_flags
+        raw_scores["hit_rate_flag"] = hit_rate_flags
 
     # raw_scores is a dataframe, ensure the values in raw_scores have maximum four decimal places
     raw_scores = raw_scores.round(6)
@@ -834,7 +857,10 @@ def post_fill_metrics(
         output_path = csv_path.with_name(out_csv_name)
     else:
         #output_path is csv_path with "_postfilled" appended before the .csv extension
-        output_path = csv_path.with_name(csv_path.stem + "_postfilled.csv")
+        if not vina_use_reflig_centroid:
+            output_path = csv_path.with_name(csv_path.stem + "_vinaLigCenter_postfilled.csv")
+        else:
+            output_path = csv_path.with_name(csv_path.stem + "_postfilled.csv")
     if output_path.exists() and not overwrite:
         print(f"[INFO] Updating existing metrics file at {output_path}.")
         existing_scores = pd.read_csv(output_path)
@@ -852,6 +878,7 @@ def post_fill_metrics(
             existing_scores["sc_rmsd"] = raw_scores["sc_rmsd"]
         if compute_success_rate:
             existing_scores["success_flag"] = raw_scores["success_flag"]
+            existing_scores["hit_rate_flag"] = raw_scores["hit_rate_flag"]
         if compute_sc_rmsd_twoA:
             existing_scores["sc_rmsd_2A"] = raw_scores["sc_rmsd_2A"]
         existing_scores = _ensure_metric_column_order(existing_scores)
@@ -861,6 +888,26 @@ def post_fill_metrics(
         raw_scores.to_csv(output_path, index=False)
     print(f"[DONE] Wrote PoseCheck metrics to {output_path}")
 
+
+def _parse_range(arg: str | None) -> tuple[int | None, int | None]:
+    """this function only designed for parsing args.dir_range
+
+    Args:
+        arg (str | None): directory range string, e.g., "0-10", "5-", "7"
+
+    Returns:
+        tuple[int | None, int | None]: (start_idx, end_idx)
+    """
+    if arg is None:
+        return (None, None)
+    s = arg.strip()
+    if "-" not in s:
+        n = int(s)
+        return (n, n + 1)
+    left, right = s.split("-", 1)
+    start = int(left) if left else None
+    end = int(right) if right else None
+    return (start, end)
 
 if __name__ == "__main__":
     args = _parse_args()
@@ -886,8 +933,16 @@ if __name__ == "__main__":
             overwrite=args.overwrite,
         )
     else:
-
-        for idx, pocket_dir in enumerate(sorted(args.results_dir.iterdir())):
+        
+        sorted_dirs = sorted(args.results_dir.iterdir())
+        # get number of directories under args.results_dir
+        num_dirs = sum(1 for d in sorted_dirs if d.is_dir())
+        assert num_dirs == 100, f"Expected 100 pocket directories under {args.results_dir}, found {num_dirs}."
+        if args.dir_range:
+            start_idx, end_idx = _parse_range(args.dir_range)
+            sorted_dirs = sorted_dirs[start_idx:end_idx]
+            print(f"[INFO] Processing pocket dirs from index {start_idx} to {end_idx}.")
+        for idx, pocket_dir in enumerate(sorted_dirs):
             if not pocket_dir.is_dir():
                 continue
             print(f"[INFO] ========Processing {idx}th pocket directory: {pocket_dir.name}========")
@@ -905,5 +960,6 @@ if __name__ == "__main__":
                 out_csv_name=args.out_csv_name,
                 overwrite=args.overwrite,
             )
+            print(f"[INFO] ========Finished {idx}th pocket directory: {pocket_dir.name}, took {time.time() - start_time:.2f} seconds ========")
     end_time = time.time()
     print(f"[INFO] Total execution time: {end_time - start_time:.2f} seconds.")

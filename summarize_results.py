@@ -89,6 +89,17 @@ def compute_mean_for_single_metric_per_pocket(csv_path: Path, target_field: str,
     summary.update({"pocket": csv_path.parent.name, "count": len(selected_rows)})
     return summary
 
+def get_median_scores(csv_path: Path) -> dict:
+    with csv_path.open("r", newline="") as handle:
+        csv_reader = csv.DictReader(handle)
+        rows = list(csv_reader)
+    summary = {"pocket": csv_path.parent.name, "count": len(rows)}
+    # compute median for each field in csv
+    for field in csv_reader.fieldnames:
+        summary[field] = safe_median([safe_float(row.get(field)) for row in rows])
+
+    return summary
+
 def get_mean_scores(csv_path: Path) -> dict:
     with csv_path.open("r", newline="") as handle:
         csv_reader = csv.DictReader(handle)
@@ -97,7 +108,10 @@ def get_mean_scores(csv_path: Path) -> dict:
     # compute mean for each field in csv
     for field in csv_reader.fieldnames:
         summary[field] = safe_mean([safe_float(row.get(field)) for row in rows])
-
+    
+    # handle ourliers for vina_min
+    if summary['vina_score'] < summary['vina_min']:
+        summary['vina_min'] = summary['vina_score']
     return summary
 
 def summarize_over_csv_files(csv_files, save_path, fields) -> None:
@@ -156,15 +170,19 @@ def overall_mean_singleMetric_perPocket(csv_files, save_path, target_field, top_
 
     print(f"Wrote statistics for {len(pocket_summaries)} pockets to {save_path}.")
 
-def overall_mean_perPocket(csv_files, save_path, fields) -> None:
+def summarize_results_across_pockets(csv_files, save_path, fields, mode="mean") -> None:
     """
     This version uses csv.DictWriter.
     Aggregate per-pocket summaries and an overall mean row.
     """
     if not csv_files:
         raise SystemExit("No CSV files provided for summarization.")
-
-    pocket_summaries = [get_mean_scores(path) for path in csv_files]
+    if mode == "mean":
+        pocket_summaries = [get_mean_scores(path) for path in csv_files]
+    elif mode == "median":
+        pocket_summaries = [get_median_scores(path) for path in csv_files]
+    else:
+        raise SystemExit(f"Unknown mode: {mode}")
     header = ["pocket", "count"] + fields
 
     # Compute the OVERALL row by averaging each metric across pockets.
@@ -204,6 +222,37 @@ def summarize_med_over_csv_files(csv_files, save_path, fields) -> None:
         values = [safe_float(row.get(field)) for row in all_rows]
         medians[field] = safe_median(values)
 
+        # values = []
+        # for row in all_rows:
+        #     value = safe_float(row.get(field))
+        #     if field == "vina_dock":
+        #         vina_score = safe_float(row.get("vina_score"))
+        #         vina_min = safe_float(row.get("vina_min"))
+        #         if not vina_score or not vina_min:
+        #             continue
+        #         if abs(vina_min) <= abs(vina_score):
+        #             continue
+        #         if abs(vina_score) < abs(value) and abs(vina_min) < abs(value):
+        #             values.append(value)
+        #         else:
+        #             continue
+        #     elif field == "vina_min":
+        #         vina_score = safe_float(row.get("vina_score"))
+        #         vina_dock = safe_float(row.get("vina_dock"))
+        #         if not vina_score or not vina_dock:
+        #             continue
+        #         if abs(vina_score) < abs(value) <= abs(vina_dock):
+        #             values.append(value)
+        #         else:
+        #             values.append(vina_score)
+        #     else:
+        #         values.append(value)
+        # medians[field] = safe_median(values)
+        if field == "vina_dock":
+            print(f"valid vina_dock count: {len(values)} / {len(all_rows)}")
+        if field == "vina_min":
+            print(f"valid vina_min count: {len(values)} / {len(all_rows)}")
+
     overall_row = [medians[field] for field in fields]
 
     with save_path.open("w", newline="") as handle:
@@ -235,8 +284,26 @@ def summarize_mean_over_csv_files(csv_files, save_path, fields) -> None:
 
     means = {}
     for field in fields:
-        values = [safe_float(row.get(field)) for row in all_rows]
+        # values = [safe_float(row.get(field)) for row in all_rows]
+        # means[field] = safe_mean(values)
+
+        values = []
+        for row in all_rows:
+            value = safe_float(row.get(field))
+            if field == "vina_min":
+                vina_score = safe_float(row.get("vina_score"))
+                vina_dock = safe_float(row.get("vina_dock"))
+                if not vina_score or not vina_dock:
+                    continue
+                if abs(vina_score) < abs(value) <= abs(vina_dock):
+                    values.append(value)
+                else:
+                    values.append(vina_score)
+            else:
+                values.append(value)
         means[field] = safe_mean(values)
+        if field == "vina_min":
+            print(f"valid vina_min count: {len(values)} / {len(all_rows)}")
 
     overall_row = [means[field] for field in fields]
 
@@ -300,7 +367,8 @@ if __name__ == "__main__":
         "vina_min",
         "vina_dock",
         "sc_rmsd",
-        "success_flag"
+        "success_flag",
+        "hit_rate_flag"
     ]
     args = parse_args()
 
@@ -313,21 +381,31 @@ if __name__ == "__main__":
                 # print(f"Warning: CSV file {rerank_csv_path} does not exist, skipping.")
                 raise SystemExit(f"CSV file {rerank_csv_path} does not exist.")
             rerank_csv_files.append(rerank_csv_path)
+    assert len(rerank_csv_files) == 100, f"Expected 100 CSV files, found {len(rerank_csv_files)}."
 
-    # top_percentile_per_pocket = 0.25
-    # target_field = "strain"
-    # overall_mean_singleMetric_perPocket(
-    #     rerank_csv_files,
-    #     save_path=args.results_dir / f"summary_{target_field}_top{int(top_percentile_per_pocket*100)}pct_over_{args.csv_name}",
-    #     target_field=target_field,
-    #     top_percentile_per_pocket=top_percentile_per_pocket,
-    #     reverse_sort=False
-    # )
-    # overall_mean_perPocket(
-    #     rerank_csv_files,
-    #     save_path=args.results_dir / f"summary_mean_over_{args.csv_name}",
-    #     fields=METRIC_FIELDS,
-    # )
+    list_top_percentile_per_pocket = [0.25, 0.5, 0.75]
+    target_field = "strain"
+    for top_percentile_per_pocket in list_top_percentile_per_pocket:
+        overall_mean_singleMetric_perPocket(
+            rerank_csv_files,
+            save_path=args.results_dir / f"summary_{target_field}_top{int(top_percentile_per_pocket*100)}pct_over_{args.csv_name}",
+            target_field=target_field,
+            top_percentile_per_pocket=top_percentile_per_pocket,
+            reverse_sort=False
+        )
+
+    summarize_results_across_pockets(
+        rerank_csv_files,
+        save_path=args.results_dir / f"summary_mean_over_{args.csv_name}",
+        fields=METRIC_FIELDS,
+        mode="mean"
+    )
+    summarize_results_across_pockets(
+        rerank_csv_files,
+        save_path=args.results_dir / f"summary_med_over_{args.csv_name}",
+        fields=METRIC_FIELDS,
+        mode="median"
+    )
     # summarize_mean_over_csv_files(
     #     rerank_csv_files,
     #     args.results_dir / f"summary_mean_over_{args.csv_name}",
@@ -346,3 +424,8 @@ if __name__ == "__main__":
         target_field=target_field,
         threshold=percentile_threshold
     )
+    # Write the percentile to a text file
+    percentile_file = args.results_dir / f"{target_field}_below_{percentile_threshold}_{args.csv_name}.txt"
+    with percentile_file.open("w") as f:
+        f.write(f"Percentile of {target_field} below {percentile_threshold}: {percentile}%\n")
+    print(f"Wrote percentile information to {percentile_file}.")

@@ -28,6 +28,10 @@ METRIC_FIELDS = [
 ]
 
 RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5} # from paper MolJO
+# RERANK_WEIGHTS = {"vina_score": 4.0, "qed": 1.0, "sa": 1.5} 
+# RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.8} 
+# RERANK_WEIGHTS = {"vina_score": 0.386, "qed": 0.186, "sa": 0.428}
+# RERANK_WEIGHTS = {"vina_score": 0.39, "qed": 0.18, "sa": 0.43}
 # RERANK_WEIGHTS = {"vina_score": 0.27, "qed": 0.13, "sa": 0.3, "distance": 0.3}
 # RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 3.0} 
 # RERANK_WEIGHTS = {"vina_score": 5.0, "qed": 1.0, "sa": 1.5, "distance": 1.0}
@@ -75,6 +79,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--n_range",
+        type=str,
+        default=None,
+        help=(
+            "Range of entries to select per pocket, in the format 'start:end' or 'start:'"
+        ),
+    )
+    parser.add_argument(
         "--no_rank",
         action="store_true",
         help="If set, do not rerank; just select the top N raw entries.",
@@ -86,8 +98,6 @@ def parse_args():
         help="Whether to summarize over all pockets into a single CSV.",
         )
     return parser.parse_args()
-
-args = argparse.Namespace(csv_name="raw.csv", sdf_name="raw.sdf", top_n=10)
 
 
 def safe_float(value):
@@ -261,7 +271,7 @@ def zscore_rerank_csv_sdf_given_dir(search_dir: Path, csv_name: str, sdf_name: s
 
     return top_csv_path, top_sdf_path
 
-def select_topN(pocket_dir: Path, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n) -> list[Path]:
+def select_topN(pocket_dir: Path, csv_name, sdf_name, top_n) -> list[Path]:
     csv_path = (pocket_dir / csv_name).resolve()
     sdf_path = (pocket_dir / sdf_name).resolve()
 
@@ -298,6 +308,58 @@ def select_topN(pocket_dir: Path, csv_name=args.csv_name, sdf_name=args.sdf_name
             sdf_writer.write(mol)
 
     return top_csv_path, top_sdf_path
+
+def select_N_byRange(pocket_dir: Path, csv_name, sdf_name, start_idx, end_idx) -> list[Path]:
+    csv_path = (pocket_dir / csv_name).resolve()
+    sdf_path = (pocket_dir / sdf_name).resolve()
+
+    with csv_path.open("r", newline="") as handle:
+        csv_reader = csv.DictReader(handle)
+        rows = list(csv_reader)
+
+    supplier = Chem.SDMolSupplier(str(sdf_path))
+    molecules = [mol for mol in supplier]
+
+    if not rows:
+        raise SystemExit(f"'{csv_path}' is empty; cannot select entries.")
+    if len(rows) != len(molecules):
+        raise SystemExit(
+            f"len(rows) is {len(rows)} but len(molecules) is {len(molecules)}"
+        )
+    if start_idx < 0 or end_idx < 0:
+        raise SystemExit(
+            f"Range must be non-negative; got start_idx={start_idx}, end_idx={end_idx}."
+        )
+    if start_idx >= end_idx:
+        raise SystemExit(
+            f"Invalid range; start_idx={start_idx} must be smaller than end_idx={end_idx}."
+        )
+    if start_idx >= len(rows):
+        raise SystemExit(
+            f"start_idx={start_idx} is out of bounds for {len(rows)} entries."
+        )
+
+    bounded_end_idx = min(end_idx, len(rows))
+    selected_rows = rows[start_idx:bounded_end_idx]
+    selected_molecules = molecules[start_idx:bounded_end_idx]
+
+    fieldnames = list(csv_reader.fieldnames or rows[0].keys())
+    range_tag = f"{start_idx}-{bounded_end_idx}"
+    selected_csv_path = pocket_dir / f"raw_range{range_tag}.csv"
+    with selected_csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=fieldnames, extrasaction="ignore"
+        )
+        writer.writeheader()
+        for row in selected_rows:
+            writer.writerow(row)
+
+    selected_sdf_path = pocket_dir / f"raw_range{range_tag}.sdf"
+    with Chem.SDWriter(str(selected_sdf_path)) as sdf_writer:
+        for mol in selected_molecules:
+            sdf_writer.write(mol)
+
+    return selected_csv_path, selected_sdf_path
 
 def get_mean_scores(csv_path: Path) -> dict:
     with csv_path.open("r", newline="") as handle:
@@ -368,9 +430,18 @@ if __name__ == "__main__":
     for pocket_dir_idx, pocket_dir in enumerate(sorted(args.results_dir.iterdir())):
         print(f"======Processing {pocket_dir_idx}th pocket directory: {pocket_dir}======")
         if not pocket_dir.is_dir():
+            print(f"Skipping, not a directory.")
             continue
-        if args.no_rank:
-            raw_lastN_csv, raw_lastN_sdf = select_topN(pocket_dir, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n)
+        # if args.no_rank and args.top_n and not args.n_range:
+        #     raw_lastN_csv, raw_lastN_sdf = select_topN(pocket_dir, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n)
+        if args.no_rank and args.n_range:
+            try:
+                start_str, end_str = args.n_range.split(":")
+                start_idx = int(start_str)
+                end_idx = int(end_str)
+            except Exception as e:
+                raise SystemExit(f"Invalid n_range format: {args.n_range}. Expected 'start:end'. Error: {e}")
+            raw_range_csv, raw_range_sdf = select_N_byRange(pocket_dir, csv_name=args.csv_name, sdf_name=args.sdf_name, start_idx=start_idx, end_idx=end_idx)
         else:
             rerank_top_csv, rerank_top_sdf = zscore_rerank_csv_sdf_given_dir(pocket_dir, csv_name=args.csv_name, sdf_name=args.sdf_name, top_n=args.top_n, weights=RERANK_WEIGHTS)
             rerank_top_csv_files.append(rerank_top_csv)
