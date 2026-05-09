@@ -29,7 +29,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pocket_pdb_dir",
         type=Path,
-        default=Path("/home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test"),
+        default=Path("datasets2/processed_crossdock_noH_full_temp/test"),
         help=(
             "Directory containing receptor files (<pocket>.pdbqt or <pocket>.pdb) "
             "that match the parent folder name of the SDF."
@@ -41,11 +41,22 @@ def _parse_args() -> argparse.Namespace:
         default=Path("affinity_ref.csv"),
         help="CSV file containing reference affinities for each pocket.",
     )
+    parser.add_argument(
+        "--vina_mode",
+        type=str,
+        default="vina_score",
+        choices=["vina_score", "vina_dock"],
+        help="Which vina metric to use for high affinity comparison.",
+    )
+    parser.add_argument(
+        "--compute_ref_affinity",
+        action="store_true",
+        help="Compute reference affinities instead of evaluating generated high-affinity ratios.",
+    )
     return parser.parse_args()
 
 
 def eval_ref_affinity(args, save: bool = True):
-    args = _parse_args()
     print(args)
     pocket_pdb_dir = args.pocket_pdb_dir
     sorted_files = sorted(pocket_pdb_dir.iterdir())
@@ -105,16 +116,15 @@ def eval_high_affinity(args):
             with raw_scores_csv_path.open("r", newline="") as f:
                 raw_scores_csv_reader = csv.DictReader(f)
                 raw_scores_rows = list(raw_scores_csv_reader)
-            # count how many ligands have vina_score better than ref vina_score
-            # ref_vina_score = float(ref_row["vina_score"])
-            ref_vina_score = float(ref_row["vina_score"])
-            high_affinity_count = sum(1 for r in raw_scores_rows if abs(float(r["vina_score"])) > abs(ref_vina_score))
+            # count how many ligands have vina metric better than ref
+            ref_vina_value = float(ref_row[args.vina_mode])
+            high_affinity_count = sum(1 for r in raw_scores_rows if abs(float(r[args.vina_mode])) > abs(ref_vina_value))
             high_affinity_counts.append(high_affinity_count)
             generated_mol_counts.append(len(raw_scores_rows))
             # temp check len(raw_scores_rows) == 100
             # assert len(raw_scores_rows) == 100, f"Expected 100 generated ligands for pocket {dir_per_pocket.name}, found {len(raw_scores_rows)}."
 
-            print(f"Pocket {ref_row['pocket_name']}: {high_affinity_count} ligands have better vina_score than reference ({ref_vina_score}).")
+            print(f"Pocket {ref_row['pocket_name']}: {high_affinity_count} ligands have better {args.vina_mode} than reference ({ref_vina_value}).")
             # print(f"high affinity rate per pocket: {high_affinity_count}/{len(raw_scores_rows)} = {(high_affinity_count/len(raw_scores_rows))*100.0:.2f}%")
             break
     
@@ -133,7 +143,9 @@ def eval_high_affinity(args):
 
 if __name__ == "__main__":
     args = _parse_args()
-    assert args.results_dir is not None, "Please provide --results_dir argument."
-    assert args.csv_name is not None, "Please provide --csv_name argument."
-    # eval_ref_affinity(args)
-    eval_high_affinity(args)
+    if args.compute_ref_affinity:
+        eval_ref_affinity(args)
+    else:
+        assert args.results_dir is not None, "Please provide --results_dir argument."
+        assert args.csv_name is not None, "Please provide --csv_name argument."
+        eval_high_affinity(args)

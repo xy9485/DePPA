@@ -358,13 +358,13 @@ def main():
                 use_meeko=False,
                 vina_mode='vina_score',
             ),
-            "vina_min": partial(
-                model.molecule_properties.calculate_docking_score,
-                center_xyz=vina_center_xyz,
-                receptor_pdbqt_file=str(receptor_file),
-                use_meeko=False,
-                vina_mode='vina_min',
-            ),
+            # "vina_min": partial(
+            #     model.molecule_properties.calculate_docking_score,
+            #     center_xyz=vina_center_xyz,
+            #     receptor_pdbqt_file=str(receptor_file),
+            #     use_meeko=False,
+            #     vina_mode='vina_min',
+            # ),
             # "vina_dock": partial(
             #     model.molecule_properties.calculate_docking_score,
             #     center_xyz=mean_coord,
@@ -417,6 +417,19 @@ def main():
         group_name = f"nIter{args.rollouts}_nSample{args.n_samples}_ligSize{ligSize}_allFrags{int(args.all_frags)}_ii{args.inference_interval}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}"
         group_name += args.group_name_suffix
         assert len(group_name) <= 128, "WandB group name exceeds 128 characters."
+
+        if args.output_dir:
+            output_dir = Path("records") / args.output_dir
+        else:
+            output_dir = Path("records") / Path(group_name)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Skip pockets whose outputs already exist (e.g. after Slurm requeue/preemption).
+        pocket_out = output_dir / base
+        if (pocket_out / "raw.csv").exists():
+            print(f"  Skipping {base}: outputs already exist at {pocket_out}")
+            continue
+
         wandb.init(
             project="DiffSBDD-PPO",
             mode=args.wandb_mode,
@@ -426,12 +439,6 @@ def main():
         )
         wandb_logger = LoggerWandb()
         print("ppo_config:", ppo_config)
-    
-        if args.output_dir:
-            output_dir = Path("rl_batch_testset") / args.output_dir
-        else:
-            output_dir = Path("rl_batch_testset") / Path(group_name)
-        output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             all_records = []
@@ -454,6 +461,43 @@ def main():
                 episodic_metrics["General/rollout_idx"] = rollout_idx
                 if wandb_logger is not None:
                     wandb_logger.log_and_dump(episodic_metrics)
+                # Eval
+                if rollout_idx == args.rollouts - 1:
+                    ppo_config_eval = copy.deepcopy(ppo_config)
+                    ppo_config_eval.inference_interval = 1
+                    all_records_eval = []
+                    all_episodic_metrics_eval = []
+
+                    for eval_iter in range(4):
+                        with torch.no_grad():
+                            episodic_metrics_eval, sample_records_eval = model.generate_ligands_rl(
+                                str(pdb_file),
+                                25, # 25 samples for eval iteration
+                                pocket_ids=pocket_ids,
+                                ref_ligand=None if pocket_ids is not None else str(ref_ligand),
+                                num_nodes_lig=num_nodes_lig,
+                                # n_nodes_min=1,
+                                sanitize=args.sanitize,
+                                largest_frag=not args.all_frags,
+                                relax_iter=(200 if args.relax else 0),
+                                timesteps=args.timesteps,
+                                ppo_config=ppo_config_eval,
+                                policy_update=False,
+                                return_samples=True,
+                            )
+                        all_records_eval.extend(sample_records_eval)
+                        all_episodic_metrics_eval.append(episodic_metrics_eval)
+                    # prefix "Eval/" to metric keys for eval logging
+                    wandb_table_cols = ["eval_iter"] + list(episodic_metrics_eval.keys())
+                    eval_table = wandb.Table(columns=wandb_table_cols)
+                    for eval_iter, episodic_metrics_eval in enumerate(all_episodic_metrics_eval):
+                        eval_table.add_data(eval_iter, *episodic_metrics_eval.values())
+                    wandb_logger.log_and_dump({"Eval/table": eval_table})
+                    # episodic_metrics_eval = {f"Eval/{k}": v for k, v in episodic_metrics_eval.items()}
+                    # episodic_metrics_eval["General/rollout_idx"] = rollout_idx
+                    # if wandb_logger is not None:
+                        # wandb_logger.log_and_dump(episodic_metrics_eval)
+
 
             if not all_records:
                 print(f"No molecules generated for {base}, skipping save.")
@@ -466,6 +510,14 @@ def main():
 
             pocket_out = output_dir / base
             save_records(all_records, pocket_out, "raw")
+            save_records(all_records_eval, pocket_out, "raw_eval")
+
+            ckpt_path = pocket_out / "model.ckpt"
+            torch.save(
+                {"state_dict": model.state_dict(), "hyper_parameters": dict(model.hparams)},
+                ckpt_path,
+            )
+            print(f"Saved model checkpoint to {ckpt_path}")
             
             # [recording processed results with weighted sum for sorting]
             # weights_for_sorting = reward_weights.copy()
