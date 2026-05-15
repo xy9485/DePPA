@@ -87,7 +87,6 @@ if __name__ == "__main__":
 
     # prepare_receptor = os.path.join(AutoDockTools.__path__[0], 'Utilities24/prepare_receptor4.py')
 
-    # tmp_folder = "/home/xue/repos/DiffSBDD/tmp"
     # tmp_pdbfile = os.path.join(tmp_folder, f"{pdb_id}.pdb")
 
     # # copy pdbfile to tmp folder

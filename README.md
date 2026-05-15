@@ -1,6 +1,6 @@
 # Fine-tuning Pocket-Aware Diffusion Models via Denoising Policy Optimization
 ---
-This repository is the official implementation of **DEPPA**, a structure-based molecule optimization method.
+This repository is the official implementation of **DePPA**, a structure-based molecule optimization method.
 
 ![Screenshot](img/DePPA-Pipeline2.png)
 
@@ -35,13 +35,15 @@ python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckp
 This evaluates QuickVina2 metrics (Vina Score, Vina Min, Vina Dock, scRMSD), PoseCheck metrics (Strain Energy, Steric Clash), diversity
 
 ```bash
-python post_metrics.py --results_dir {results_dir} --csv_name raw_eval.csv
+python post_metrics.py --results_dir {path/to/results} --csv_name raw_eval.csv --pocket_pdb_dir {path/to/testset}
+python summarize_results.py --results_dir {path/to/results}  --csv_name {path/to/post_filled_csv}
 ```
 
 **Evaluate the top-N ligands**
 ```bash
-python rerank_summarize_results.py --results_dir {results_dir} --top_n 10
-python python post_metrics.py --results_dir {results_dir} --csv_name {top_n_csv}
+python rerank_summarize_results.py --results_dir {path/to/results} --top_n 10
+python python post_metrics.py --results_dir {path/to/results} --csv_name {top_n_csv}
+python summarize_results.py --results_dir {path/to/results}  --csv_name {path/to/post_filled_csv}
 ```
 
 **Compute high-affinity rate in two steps.**
@@ -49,20 +51,14 @@ python python post_metrics.py --results_dir {results_dir} --csv_name {top_n_csv}
 First, compute the binding affinity of the reference ligand molecules given test set directory. 
 
 ```bash
-python eval_high_affinity.py \
-  --compute_ref_affinity \
-  --pocket_pdb_dir {test_set_dir}
+python eval_high_affinity.py --compute_ref_affinity --pocket_pdb_dir {path/to/testset}
 ```
 This writes the reference affinity CSV to `affinity_ref.csv`.
 
 Second, compute the high-affinity rate for generated ligands using the sampling results directory, the per-pocket CSV file name, the reference affinity CSV, and the Vina metric to compare.
 
 ```bash
-python eval_high_affinity.py \
-  --results_dir {results_dir} \
-  --csv_name {csv_name} \
-  --ref_affinity_csv affinity_ref.csv \
-  --vina_mode vina_dock
+python eval_high_affinity.py --results_dir {path/to/results} --csv_name {csv_name} --ref_affinity_csv affinity_ref.csv --vina_mode vina_dock
 ```
 
 Use `--vina_mode vina_score` or `--vina_mode vina_dock` depending on which metric should define high affinity.
