@@ -881,7 +881,8 @@ class LigandPocketDDPM(pl.LightningModule):
     def generate_ligands_rl(self, pdb_file, n_samples, pocket_ids=None,
                          ref_ligand=None, num_nodes_lig=None, sanitize=False,
                          largest_frag=False, relax_iter=0, timesteps=None,
-                         n_nodes_bias=0, n_nodes_min=0, ppo_config=None, policy_update=True ,**kwargs):
+                         n_nodes_bias=0, n_nodes_min=0, ppo_config=None,
+                         policy_update=True, optimizer=None, **kwargs):
         """
         Generate ligands given a pocket
         Args:
@@ -908,10 +909,11 @@ class LigandPocketDDPM(pl.LightningModule):
         assert (pocket_ids is None) ^ (ref_ligand is None)
 
         ppo_config.episode_length = ppo_config.max_time_steps // ppo_config.inference_interval  # length of PPO trajectory
-        optimizer = torch.optim.AdamW(
-        self.ddpm.parameters(),
-        lr=ppo_config.lr, amsgrad=True,
-        weight_decay=1e-4)
+        if policy_update and optimizer is None:
+            optimizer = torch.optim.AdamW(
+                self.ddpm.parameters(),
+                lr=ppo_config.lr, amsgrad=True,
+                weight_decay=1e-4)
 
         # Load PDB
         pdb_struct = PDBParser(QUIET=True).get_structure('', pdb_file)[0]

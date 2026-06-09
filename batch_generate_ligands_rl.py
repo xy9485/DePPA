@@ -406,6 +406,12 @@ def main():
             reward_weights=reward_weights,
         )
         ppo_config.episode_length = ppo_config.max_time_steps // ppo_config.inference_interval
+        optimizer = torch.optim.AdamW(
+            model.ddpm.parameters(),
+            lr=ppo_config.lr,
+            amsgrad=True,
+            weight_decay=1e-4,
+        )
 
         if args.kl_coeff_pretrain > 0:
             model.ddpm_pretrained = copy.deepcopy(model.ddpm).to(device)
@@ -455,6 +461,7 @@ def main():
                     relax_iter=(200 if args.relax else 0),
                     timesteps=args.timesteps,
                     ppo_config=ppo_config,
+                    optimizer=optimizer,
                     return_samples=True,
                 )
                 all_records.extend(sample_records)
