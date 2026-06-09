@@ -318,6 +318,18 @@ def minmax_normalize_masked(vals:np.ndarray, valid:np.ndarray):
     out[idx] = np.clip(out[idx], 0.0, 1.0)
     return out
 
+def zscore_normalize_masked(vals:np.ndarray, valid:np.ndarray):
+    assert vals.size == valid.size
+    out = np.full_like(vals, np.nan, dtype=np.float32)
+    idx = np.where(valid)[0]
+    if idx.size == 0:
+        return out
+    sub = vals[idx]
+    mu = sub.mean()
+    sigma = sub.std() + 1e-8
+    out[idx] = (sub - mu) / sigma
+    return out
+
 def pct_to_normal(p, eps=1e-3):
     z = np.full_like(p, np.nan, dtype=np.float32)
     m = ~np.isnan(p)

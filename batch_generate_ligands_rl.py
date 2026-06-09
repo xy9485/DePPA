@@ -11,7 +11,7 @@ import torch
 from rdkit import Chem, DataStructs
 from Bio.PDB import PDBParser
 from openbabel import openbabel
-import posecheck
+# import posecheck
 
 import utils
 from lightning_modules import LigandPocketDDPM
@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--dataset_dir",
         type=Path,
-        default=Path("/home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test"),
+        default=None,
         help="Directory containing pocket pdb/pdbqt, residue txt, and reference ligand sdf files.",
     )
     parser.add_argument(
@@ -419,9 +419,9 @@ def main():
         assert len(group_name) <= 128, "WandB group name exceeds 128 characters."
 
         if args.output_dir:
-            output_dir = Path("records") / args.output_dir
+            output_dir = Path("results") / args.output_dir
         else:
-            output_dir = Path("records") / Path(group_name)
+            output_dir = Path("results") / Path(group_name)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Skip pockets whose outputs already exist (e.g. after Slurm requeue/preemption).
