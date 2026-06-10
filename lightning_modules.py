@@ -1095,7 +1095,7 @@ class LigandPocketDDPM(pl.LightningModule):
                         div_raw[i] = 1.0 - np.mean(sims)  # “how different mol i is from others”
                 return div_raw
 
-            def _postprocess(array, valid_array, mode='rank'):
+            def _postprocess(array, valid_array, mode=getattr(ppo_config, 'reward_norm_mode', 'rank')):
                 if mode == 'rank':
                     norm_array = utils.rank01_masked(array, valid_array, rescale=False)
                     norm_array = utils.pct_to_normal(norm_array)

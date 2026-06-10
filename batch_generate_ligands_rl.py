@@ -63,6 +63,13 @@ def parse_args():
     parser.add_argument("--clip_range", type=float, default=0.2, help="PPO clip range.")
     parser.add_argument("--max_grad_norm", type=float, default=0.5, help="PPO grad clipping.")
     parser.add_argument("--kl_coeff_pretrain", type=float, default=0.0, help="KL penalty to the pretrained policy.")
+    parser.add_argument(
+        "--reward_norm_mode",
+        type=str,
+        choices=("rank", "minmax", "zscore"),
+        default="rank",
+        help="Normalization scheme for reward post-processing (_postprocess mode).",
+    )
     parser.add_argument("--top_k", type=int, default=100, help="How many ligands to retain per pocket.")
     parser.add_argument(
         "--summary",
@@ -404,6 +411,7 @@ def main():
             kl_coeff_pretrain=args.kl_coeff_pretrain,
             reward_num_workers=args.reward_workers,
             reward_weights=reward_weights,
+            reward_norm_mode=args.reward_norm_mode,
         )
         ppo_config.episode_length = ppo_config.max_time_steps // ppo_config.inference_interval
 
@@ -424,11 +432,13 @@ def main():
             output_dir = Path("results") / Path(group_name)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Skip pockets whose outputs already exist (e.g. after Slurm requeue/preemption).
+        # Abort if outputs already exist: an overlapped output dir is not desired.
         pocket_out = output_dir / base
         if (pocket_out / "raw.csv").exists():
-            print(f"  Skipping {base}: outputs already exist at {pocket_out}")
-            continue
+            raise SystemExit(
+                f"Overlapped output encountered for {base}: outputs already exist at {pocket_out}. "
+                f"Aborting to avoid mixing results."
+            )
 
         wandb.init(
             project="DiffSBDD-PPO",
@@ -468,7 +478,8 @@ def main():
                     all_records_eval = []
                     all_episodic_metrics_eval = []
 
-                    for eval_iter in range(4):
+                    model.ddpm.eval()
+                    for eval_iter in range(8):
                         with torch.no_grad():
                             episodic_metrics_eval, sample_records_eval = model.generate_ligands_rl(
                                 str(pdb_file),
@@ -487,6 +498,9 @@ def main():
                             )
                         all_records_eval.extend(sample_records_eval)
                         all_episodic_metrics_eval.append(episodic_metrics_eval)
+
+                    # restore the policy network's previous (training) mode
+                    model.ddpm.train()
                     # prefix "Eval/" to metric keys for eval logging
                     wandb_table_cols = ["eval_iter"] + list(episodic_metrics_eval.keys())
                     eval_table = wandb.Table(columns=wandb_table_cols)
@@ -497,6 +511,7 @@ def main():
                     # episodic_metrics_eval["General/rollout_idx"] = rollout_idx
                     # if wandb_logger is not None:
                         # wandb_logger.log_and_dump(episodic_metrics_eval)
+                    save_records(all_records_eval, pocket_out, "raw_eval")
 
 
             if not all_records:
@@ -508,9 +523,7 @@ def main():
             # for rec, dist in zip(all_records, distance2):
             #     rec["metrics"]["distance2"] = dist
 
-            pocket_out = output_dir / base
             save_records(all_records, pocket_out, "raw")
-            save_records(all_records_eval, pocket_out, "raw_eval")
 
             ckpt_path = pocket_out / "model.ckpt"
             torch.save(
