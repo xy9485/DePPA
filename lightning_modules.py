@@ -1312,6 +1312,8 @@ class LigandPocketDDPM(pl.LightningModule):
             mu, sigma = valid_scores.mean(), valid_scores.std() + 1e-8
             combined[~valid_array] = mu - 3.0 * sigma  # assign invalids to be 3 std below mean
             # combined[~valid_array] = FIXED_INVALID_PENALTY
+            if ppo_config.reward_norm_mode == 'minmax':
+                combined[~valid_array] = -0.1
 
             # combined = np.array(list_qed) * 0.8 + np.array(list_sa) * 0.2 + np.array(list_docking) * 0.1
             # combined[~valid_array] = -0.1
