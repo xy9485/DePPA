@@ -46,32 +46,97 @@ GROUPS = [
 # each value is the list of W&B groups (repeats) belonging to that setting.
 # The mean ±1 std band is computed across the groups within each setting,
 # and one curve+band is drawn per setting on a shared figure.
+
+# compare reward normalization technique across rank, zscore and minmax with ii5
+# SETTINGS_DICT = {
+#     "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormRank": GROUPS,
+#     "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormZscore": [
+#         "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_1",
+#         "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_4",
+#         "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_5",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisReprodZscore1",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisReprodZscore2",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisReprodZscore3"
+#     ],
+#     "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormMinmax": [
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_RTX_minmaxFixP_1",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_RTX_minmaxFixP_2",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisReprodMinmax1",
+#         "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_1",
+#         "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_2",
+#         "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_3",
+#         "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_4",
+#         "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_5", # 99 runs instead of 100
+#         ],
+# }
+
+# compare reward normalization technique across rank, zscore and minmax with ii10 
+# SETTINGS_DICT = {
+#     "ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormZscore": [
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisZscore_1",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisZscore_2",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisZscore_3",
+#         "ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_1",
+#         "ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_2",
+#         "ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_3"
+#     ]
+#     "ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax": [
+#         "ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_1",
+#         "ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_3",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisMinmaxFixP_1",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisMinmaxFixP_2",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii10_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisMinmaxFixP_3"
+#     ]
+# }
+
+#compare reward normalization technique across rank, zscore and minmax with ii20
+# SETTINGS_DICT = {
+#     "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormZscore": [
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_1",
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_2",
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_3",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisZscore_3",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisZscore_2"
+#     ]
+#     "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax": [
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_1",
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_2",
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_3",
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_4",
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_5",
+#         "ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormminmax_kis_6",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_RTX_minmaxFixP_1",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisMinmaxFixP_1",
+#         "nIter100_nSample32_ligSizeSample_allFrags0_ii20_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisMinmaxFixP_2"
+#     ]
+# }
+
+# Compare across different reward weight settings (QED/SA/Vina/Distance) with rewardNormRank
 SETTINGS_DICT = {
-    "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormRank": [
-    "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_#1",
-    "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_nmRep1",
-    # "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_nmRep2",
-    "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_nmRep3",
-    "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_nmRep4",
-    "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_nmRep5",
-    # "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_nmRep7",
-    "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_clamp0.25_nmRep2",
-    "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_eval_nmRep18",
-    "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_eval_nmRep17",
-],
-    "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormZscore": [
-        "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_1",
-        "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_4",
-        "ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_rewardNormzscore_kis_5",
-        "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisReprodZscore1",
-        "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisReprodZscore2",
-        "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisReprodZscore3"
+    "Vina0.5_QED0.2_SA0.2_Dist0.1": GROUPS,
+    "Vina0.7_QED0.1_SA0.1_Dist0.1": [
+        # "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_1", # 99 runs instead of 100
+        "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_3",
+        "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_4",
+        "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_5",
+        "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_6",
+        "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_8",
+        "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_9",
+        "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_10"
     ],
-    "ii5_QED0.1_SA0.1_Vina0.7_Dist0.1_KL0.0_strain0.0_rewardNormMinmax": [
-        "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_RTX_minmaxFixP_1",
-        "nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_RTX_minmaxFixP_2",
-        "Group: nIter100_nSample32_ligSizeSample_allFrags0_ii5_QED0.2_SA0.2_Vina0.5_Dist0.1_KL0.0_strain0.0_kisReprodMinmax1"
-        ]
+    "Vina0.3_QED0.3_SA0.3_Dist0.1": [
+        # "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_1", # 99 runs instead of 100
+        "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_2",
+        "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_3",
+        "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_4",
+        # "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_5", # 99 runs instead of 100
+        "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_6",
+        "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_7",
+        "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_8",
+        "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_9",
+        "ii5_QED0.3_SA0.3_Vina0.3_Dist0.1_KL0.0_strain0.0_rewardNormrank_kis_10",
+
+    ]
 }
 
 SIGNALS = [
@@ -269,7 +334,7 @@ def plot_mean_ci_settings(api, args, out, use_cache):
 
             color = colors[i % len(colors)]
             ax.plot(common_steps, center, color=color,
-                    label=f"{setting} (n={n_groups})")
+                    label=f"{setting}")
             ax.fill_between(common_steps, lower, upper, color=color, alpha=0.20)
             plotted = True
 
