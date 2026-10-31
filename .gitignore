@@ -16,3 +16,5 @@ analysis/qvina2_temp_output/*
 rl_batch*
 analysis_reverse_variance/plot_results
 analysis_reverse_variance/data
+results
+

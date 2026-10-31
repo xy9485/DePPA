@@ -1,0 +1,52 @@
+[project]
+name = "diffsbdd-rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.10.*"
+dependencies = [
+    "biopython==1.79",
+    "datamol>=0.12.5",
+    "debugpy>=1.8.20",
+    "hydride>=1.2.3",
+    "imageio>=2.37.2",
+    "matplotlib>=3.10.8",
+    "numpy==1.26.4",
+    "openbabel-wheel>=3.1.1.23",
+    "prolif>=2.1.0",
+    "pytorch-lightning==2.5.5",
+    "rdkit==2022.9.5",
+    "scipy>=1.15.3",
+    "seaborn>=0.13.2",
+    "spyrmsd>=0.9.0",
+    "torch==2.1.0",
+    "torch-geometric==2.6.1",
+    "torch-scatter==2.1.2",
+    "torchaudio==2.1.0",
+    "torchvision==0.16.0",
+    "wandb>=0.25.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[[tool.uv.index]]
+name = "pyg"
+url = "https://data.pyg.org/whl/torch-2.1.0+cu118.html"
+explicit = true # Only use this index when specifically requested or for these packages
+format = "flat"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
+torchaudio = { index = "pytorch-cu118" }
+torch_scatter = { index = "pyg" }
+
+[tool.uv]
+no-build-package = ["torch-scatter"]
+# This tells uv: "Only resolve for Linux x86_64"
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'"
+]
