@@ -1,4 +1,5 @@
 import math
+from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -503,8 +504,16 @@ class ConditionalDDPM(EnVariationalDiffusion):
         sigma_s = self.sigma(gamma_s, target_tensor=zt_lig)       # (batch,1)
         sigma_t = self.sigma(gamma_t, target_tensor=zt_lig)       # (batch,1)
 
-        # Network epsilon prediction
-        eps_t_lig, _ = self.dynamics(zt_lig, xh0_pocket, t, ligand_mask, pocket_mask)
+        # Network epsilon prediction. Optional autocast (self.amp_dtype, e.g.
+        # torch.bfloat16; None = fp32) wraps only the network, so rollout,
+        # PPO re-evaluation and the pretrained-KL pass share one precision;
+        # mu / log_prob below stay in fp32 (sigma can be tiny at low t).
+        amp_dtype = getattr(self, "amp_dtype", None)
+        amp_ctx = nullcontext() if amp_dtype is None else \
+            torch.autocast(device_type=zt_lig.device.type, dtype=amp_dtype)
+        with amp_ctx:
+            eps_t_lig, _ = self.dynamics(zt_lig, xh0_pocket, t, ligand_mask, pocket_mask)
+        eps_t_lig = eps_t_lig.float()
 
         # Optionally compute mu via predicted x0
         if mu_via_x0:

@@ -65,6 +65,7 @@ def parse_args():
     parser.add_argument("--clip_range", type=float, default=0.2, help="PPO clip range.")
     parser.add_argument("--max_grad_norm", type=float, default=0.5, help="PPO grad clipping.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay for PPO optimizer")
+    parser.add_argument("--amp_dtype", choices=("fp32", "bf16"), default="fp32", help="Precision of the dynamics network in RL rollout and PPO update (same for both).")
     parser.add_argument("--kl_coeff_pretrain", type=float, default=0.0, help="KL penalty to the pretrained policy.")
     parser.add_argument(
         "--reward_norm_mode",
@@ -357,6 +358,9 @@ def main():
 
         model = LigandPocketDDPM.load_from_checkpoint(args.checkpoint, map_location=device)
         model = model.to(device)
+        # Read by ConditionalDDPM.sample_p_zs_given_zt_rl; set before the
+        # pretrained deepcopy below so the KL reference uses the same precision
+        model.ddpm.amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else None
 
         reward_fn_dict = {
             "qed": model.molecule_properties.calculate_qed,
@@ -417,6 +421,7 @@ def main():
             reward_num_workers=args.reward_workers,
             reward_weights=reward_weights,
             reward_norm_mode=args.reward_norm_mode,
+            amp_dtype=args.amp_dtype,
         )
         ppo_config.episode_length = ppo_config.max_time_steps // ppo_config.inference_interval
 
@@ -429,6 +434,8 @@ def main():
         ligSize = "Ref" if args.mode_num_nodes_lig == 'align_reference_ligand' else "Sample"
         # group_name = f"nIter{args.rollouts}_nSample{args.n_samples}_ligSize{ligSize}_allFrags{int(args.all_frags)}_ii{args.inference_interval}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}"
         group_name = f"ii{args.inference_interval}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}_PPO{ppo_config.ppo_epochs}_SEG{ppo_config.n_segments}_rNorm{ppo_config.reward_norm_mode}_n{args.n_samples}"
+        if args.amp_dtype != "fp32":
+            group_name += f"_{args.amp_dtype}"
         group_name += args.group_name_suffix
         assert len(group_name) <= 128, "WandB group name exceeds 128 characters."
 
