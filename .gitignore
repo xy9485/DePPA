@@ -1,5 +1,5 @@
 datasets
-datasets2
+dataset*
 *.pyc
 __pycache__
 *.pkl
