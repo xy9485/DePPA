@@ -878,10 +878,15 @@ class LigandPocketDDPM(pl.LightningModule):
 
         return molecules
 
+    def configure_optimizers_rl(self, ppo_config):
+        return torch.optim.AdamW(self.ddpm.parameters(), lr=ppo_config.lr,
+                                 amsgrad=True, weight_decay=1e-4)
+
     def generate_ligands_rl(self, pdb_file, n_samples, pocket_ids=None,
                          ref_ligand=None, num_nodes_lig=None, sanitize=False,
                          largest_frag=False, relax_iter=0, timesteps=None,
-                         n_nodes_bias=0, n_nodes_min=0, ppo_config=None, policy_update=True ,**kwargs):
+                         n_nodes_bias=0, n_nodes_min=0, ppo_config=None, policy_update=True,
+                         optimizer=None, **kwargs):
         """
         Generate ligands given a pocket
         Args:
@@ -908,10 +913,10 @@ class LigandPocketDDPM(pl.LightningModule):
         assert (pocket_ids is None) ^ (ref_ligand is None)
 
         ppo_config.episode_length = ppo_config.max_time_steps // ppo_config.inference_interval  # length of PPO trajectory
-        optimizer = torch.optim.AdamW(
-        self.ddpm.parameters(),
-        lr=ppo_config.lr, amsgrad=True,
-        weight_decay=1e-4)
+        # Optimizer should persist across rollouts (created by the caller);
+        # only fall back to a fresh one if a policy update is requested without it.
+        if policy_update and optimizer is None:
+            optimizer = self.configure_optimizers_rl(ppo_config)
 
         # Load PDB
         pdb_struct = PDBParser(QUIET=True).get_structure('', pdb_file)[0]
@@ -1407,89 +1412,91 @@ class LigandPocketDDPM(pl.LightningModule):
 
         if policy_update:
             # PPO update
-            # Time indices
-            time_indices = np.arange(ppo_config.episode_length)
-
             # Pre-normalize stored times
             s_norm_all = rollout_buffer.s_steps / ppo_config.max_time_steps
             t_norm_all = rollout_buffer.t_steps / ppo_config.max_time_steps
 
-            np.random.shuffle(time_indices)
-
             approx_kl_vals = []
             clipfrac_vals = []
             loss_vals = []
+            kl_ref_vals = []
+            grad_norm_vals = []
+            n_skipped_updates = 0
 
-            for start in range(0, ppo_config.episode_length, ppo_config.batch_size):
-                end = min(start + ppo_config.batch_size, ppo_config.episode_length)
-                indices = time_indices[start:end]
+            use_kl_ref = hasattr(self, "ddpm_pretrained") and ppo_config.kl_coeff_pretrain > 0
+            # Atoms per sample (assumes >= 1 atom each; callers pass n_nodes_min=1)
+            n_atoms = torch.bincount(lig_mask, minlength=n_samples)
 
-                for i in indices:
-                    # Recompute log_prob under current policy for PPO ratio
-                    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                        out_dict = self.ddpm.sample_p_zs_given_zt_rl(
-                            s_norm_all[i], t_norm_all[i],
-                            zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
-                            ligand_mask=lig_mask, pocket_mask=pocket['mask'],
-                            action=rollout_buffer.action_steps[i], mu_via_x0=True
-                        )
-                        new_log_prob = out_dict['log_prob']        # (n_samples,)
-                        old_log_prob = rollout_buffer.log_prob_steps[i] 
-                        # is num_nodes_lig contains zeros, then corresponding log_prob would be nan, need to filter them out
-                        new_log_prob = new_log_prob[~new_log_prob.isnan()]
-                        old_log_prob = old_log_prob[~old_log_prob.isnan()]
+            n_segments = min(ppo_config.n_segments, ppo_config.episode_length)
+            if n_segments < 1:
+                raise ValueError("n_segments and episode_length must both be at least 1")
+            parameters = [p for group in optimizer.param_groups for p in group['params']]
 
-                        logratio = new_log_prob - old_log_prob
-                        ratio = torch.exp(logratio)
+            for epoch in range(ppo_config.ppo_epochs):
+                # Reshuffle time steps every epoch
+                time_indices = np.random.permutation(ppo_config.episode_length)
+                for indices in np.array_split(time_indices, n_segments):
+                    optimizer.zero_grad(set_to_none=True)
 
-                        # Optionally clip advantages if desired (not provided here)
-                        unclipped = -advantages * ratio
-                        clipped = -advantages * torch.clamp(
-                            ratio,
-                            1.0 - ppo_config.clip_range,
-                            1.0 + ppo_config.clip_range,
-                        )
-                        total_loss = 0.0
-                        loss_i = torch.mean(torch.maximum(unclipped, clipped))
-                        total_loss = total_loss + loss_i
-                        # Diagnostics similar to ddpo
-                        approx_kl_vals.append(0.5 * torch.mean(logratio ** 2).detach().item())
-                        clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach().item())
-                        loss_vals.append(loss_i.detach().item())
-                        # --- KL to pretrained policy ---
-                        if hasattr(self, "ddpm_pretrained") and ppo_config.kl_coeff_pretrain > 0:
-                            with torch.no_grad():
-                            #     # Also add KL penalty to the pretrained model to prevent
-                            #     # catastrophic policy updates
-                            #     # Compute log_prob under the pretrained model
-                                pretrained_out_dict = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
-                                    s_norm_all[i], t_norm_all[i],
-                                    zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
-                                    ligand_mask=lig_mask, pocket_mask=pocket['mask'],
-                                    action=rollout_buffer.action_steps[i], mu_via_x0=True
-                                )
-                                pretrained_log_prob = pretrained_out_dict['log_prob']
-                            pretrained_log_prob = pretrained_log_prob[~pretrained_log_prob.isnan()]
-                            new_log_prob = new_log_prob[~new_log_prob.isnan()]
-                            # # kl divergence to the pretrained model 
-                            logratio_ref_theta = pretrained_log_prob - new_log_prob
-                            ratio_ref_theta = torch.exp(logratio_ref_theta)
-                            # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                            approx_kl = (ratio_ref_theta - 1 - logratio_ref_theta)
+                    for i in indices:
+                        # Recompute log_prob under current policy for PPO ratio
+                        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                            out_dict = self.ddpm.sample_p_zs_given_zt_rl(
+                                s_norm_all[i], t_norm_all[i],
+                                zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                                ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                                action=rollout_buffer.action_steps[i], mu_via_x0=True
+                            )
+                            new_log_prob = out_dict['log_prob']        # (n_samples,)
+                            old_log_prob = rollout_buffer.log_prob_steps[i]
 
-                            # without importance sampling weights
-                            kl_loss = approx_kl.mean()
-                            # with importance sampling weights
-                            importance_sampling_weights = ratio
-                            # kl_loss = (importance_sampling_weights * approx_kl).mean()
-                            
-                            # kl_loss = torch.mean(new_log_prob - pretrained_log_prob)
-                            total_loss = total_loss + ppo_config.kl_coeff_pretrain * kl_loss
-                    # -------------------------------
-                    optimizer.zero_grad()
-                    total_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.ddpm.dynamics.parameters(),
-                                                    max_norm=1.0)
+                            logratio = new_log_prob - old_log_prob
+                            ratio = torch.exp(logratio)
+
+                            unclipped = -advantages * ratio
+                            clipped = -advantages * torch.clamp(
+                                ratio,
+                                1.0 - ppo_config.clip_range,
+                                1.0 + ppo_config.clip_range,
+                            )
+                            loss_i = torch.mean(torch.maximum(unclipped, clipped))
+                            total_loss = loss_i
+                            # Diagnostics similar to ddpo
+                            approx_kl_vals.append(0.5 * torch.mean(logratio ** 2).detach())
+                            clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach())
+                            loss_vals.append(loss_i.detach())
+                            # --- KL to pretrained policy ---
+                            if use_kl_ref:
+                                with torch.no_grad():
+                                    mu_ref = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
+                                        s_norm_all[i], t_norm_all[i],
+                                        zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                                        ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                                        action=rollout_buffer.action_steps[i], mu_via_x0=True
+                                    )['mu']
+                                # Analytic KL(pi_theta || pi_ref) per step: both are Gaussians
+                                # sharing sigma (fixed noise schedule), so
+                                # KL = ||mu_theta - mu_ref||^2 / (2 sigma^2),
+                                # averaged over atoms to match log_prob.
+                                kl_node = ((out_dict['mu'] - mu_ref) ** 2
+                                           / (2 * out_dict['sigma'] ** 2)).sum(dim=1)
+                                kl_ref = scatter_add(kl_node, lig_mask, dim=0, dim_size=n_samples) / n_atoms
+                                kl_loss = kl_ref.mean()
+                                kl_ref_vals.append(kl_loss.detach())
+                                total_loss = total_loss + ppo_config.kl_coeff_pretrain * kl_loss
+                        # -------------------------------
+                        # Accumulate gradients over the segment (averaged over its time steps)
+                        (total_loss / len(indices)).backward()
+
+                    grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm=ppo_config.max_grad_norm)
+                    # Skip the update if loss or gradients are non-finite, so NaN/Inf
+                    # never reaches the weights or the optimizer state
+                    if not torch.isfinite(grad_norm):
+                        optimizer.zero_grad(set_to_none=True)
+                        n_skipped_updates += 1
+                        print(f"Skipping PPO update (epoch {epoch}): non-finite grad norm {grad_norm.item()}")
+                        continue
+                    grad_norm_vals.append(grad_norm.detach())
                     optimizer.step()
 
                     # [when using scaler = torch.amp.GradScaler()]
@@ -1501,13 +1508,18 @@ class LigandPocketDDPM(pl.LightningModule):
                     # scaler.step(optimizer)
                     # scaler.update()
 
-            # metrics = {"rewards": rewards.mean().item()}
+            def _mean_item(vals):
+                return torch.stack(vals).float().mean().item() if vals else float('nan')
 
             episodic_metrics.update({
-                "approx_kl": float(np.mean(approx_kl_vals)),
-                "clipfrac": float(np.mean(clipfrac_vals)),
-                "loss": float(np.mean(loss_vals)),
+                "approx_kl": _mean_item(approx_kl_vals),
+                "clipfrac": _mean_item(clipfrac_vals),
+                "loss": _mean_item(loss_vals),
+                "grad_norm": _mean_item(grad_norm_vals),
+                "skipped_updates": n_skipped_updates,
             })
+            if use_kl_ref:
+                episodic_metrics["kl_ref"] = _mean_item(kl_ref_vals)
 
         return episodic_metrics, sample_records
 

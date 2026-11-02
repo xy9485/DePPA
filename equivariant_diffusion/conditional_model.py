@@ -489,7 +489,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
               mu: mean for each ligand atom
               sigma: per-batch scalar std (broadcasted by mask)
               eps_t: network epsilon prediction
-              log_prob: per-sample log prob (normalized per atom)
+              log_prob: per-sample log prob (mean over atoms, summed over features)
               zs_xzeromean: action with x part projected to COM-free together with pocket
               action_entropy: per-sample entropy (normalized per atom)
         """
@@ -542,10 +542,13 @@ class ConditionalDDPM(EnVariationalDiffusion):
             noise = self.sample_gaussian(size=mu_lig.shape, device=mu_lig.device)
             action = mu_lig + sigma_lig * noise
 
-        # Keep a zero-COM x projection version (ligand + pocket recentered)
-        # Clone to avoid modifying original action when projecting
+        # Keep a zero-COM x projection version (ligand + pocket recentered).
+        # Clone both before projecting in place: callers pass views of the
+        # rollout buffer as action/xh0_pocket, and mutating them would corrupt
+        # later re-evaluations (pretrained-KL pass, further PPO epochs).
         zs_lig = action.clone()
-        zs_lig[:, :self.n_dims], xh0_pocket[:, :self.n_dims]  = self.remove_mean_batch(
+        xh0_pocket = xh0_pocket.clone()
+        zs_lig[:, :self.n_dims], xh0_pocket[:, :self.n_dims] = self.remove_mean_batch(
             zs_lig[:, :self.n_dims],
             xh0_pocket[:, :self.n_dims],
             ligand_mask, pocket_mask
@@ -558,24 +561,21 @@ class ConditionalDDPM(EnVariationalDiffusion):
                         - 0.5 * math.log(2 * math.pi)
         # Sum over feature dims -> per-node
         log_prob_node = log_prob_feat.sum(dim=1)
-        # Aggregate per batch
-        log_prob_batch = scatter_add(log_prob_node, ligand_mask, dim=0)
-        n_atoms = scatter_add(torch.ones_like(log_prob_node), ligand_mask, dim=0)
+        # Aggregate per sample, averaged over atoms so the PPO ratio does not
+        # scale with ligand size.
+        # Assumes every ligand has >= 1 atom (callers pass n_nodes_min=1); an
+        # empty ligand would give 0/0 = NaN here. dim_size keeps the output
+        # shape at (n_samples,) to stay aligned with the advantages.
+        n_samples = s.size(0)
+        log_prob_batch = scatter_add(log_prob_node, ligand_mask, dim=0, dim_size=n_samples)
+        n_atoms = scatter_add(torch.ones_like(log_prob_node), ligand_mask, dim=0,
+                              dim_size=n_samples)
         log_prob = log_prob_batch / n_atoms
-        # log_prob = torch.nan_to_num(log_prob, nan=0.0)
-
-        # Attention: when num_nodes_lig is sampled conditioned on pocket size, ligand_mask will skip certain indice
-        # e.g. num_nodes_lig = [3,0,5], ligand_mask = [0,0,0,2,2,2,2,2], meaning only two ligands are actually to be sampled
-        # the shape of log_prob_batch and n_atoms will be (3,), with one zero entry corresponding to the skipped ligand
-        # we need to filter out these zero entries before normalizing log_prob by n_atoms to avoid NaN values, so that the shape of log_prob aligns with that of advantages
-        # log_prob_batch = log_prob_batch[log_prob_batch!=0]
-        # n_atoms = n_atoms[n_atoms!=0]
-        # log_prob = log_prob_batch / n_atoms
 
         # Entropy (same scalar per feature, sum over features, normalize)
         entropy_feat = 0.5 + 0.5 * math.log(2 * math.pi) + torch.log(sigma_lig)
         entropy_node = entropy_feat.sum(dim=1)
-        entropy_batch = scatter_add(entropy_node, ligand_mask, dim=0) / n_atoms
+        entropy_batch = scatter_add(entropy_node, ligand_mask, dim=0, dim_size=n_samples) / n_atoms
         # entropy_batch = torch.nan_to_num(entropy_batch, nan=0.0)
 
         # entropy_batch = scatter_add(entropy_node, ligand_mask, dim=0)

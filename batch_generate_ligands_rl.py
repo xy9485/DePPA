@@ -51,6 +51,7 @@ def parse_args():
     )
     parser.add_argument("--n_samples", type=int, default=64, help="Samples per rollout.")
     parser.add_argument("--rollouts", type=int, default=10, help="Number of PPO rollouts per pocket.")
+    parser.add_argument("--skip_eval", action="store_true", help="Skip post-training evaluation for lightweight training tests.")
     parser.add_argument('--mode_num_nodes_lig', choices=('align_reference_ligand', 'sample'), default=None, help="Control ligand node count: keeping the same size with the reference ligand or sample conditioned on pocket size.")
     parser.add_argument("--sanitize", action="store_true", help="Sanitize generated molecules.")
     parser.add_argument("--relax", action="store_true", help="Run force field relaxation.")
@@ -58,7 +59,8 @@ def parse_args():
     parser.add_argument("--timesteps", type=int, default=None, help="Override diffusion timesteps.")
     parser.add_argument("--reward_workers", type=int, default=4, help="Workers for reward computation.")
     parser.add_argument("--ppo_lr", type=float, default=1e-5, help="PPO learning rate.")
-    parser.add_argument("--ppo_batch_size", type=int, default=32, help="PPO minibatch size.")
+    parser.add_argument("--ppo_epochs", type=int, default=4, help="Number of PPO passes over the same rollout buffer.")
+    parser.add_argument("--n_segments", type=int, default=1, help="Number of time-step segments (optimizer updates) per PPO epoch.")
     parser.add_argument("--inference_interval", type=int, default=10, help="Steps between PPO observations.")
     parser.add_argument("--clip_range", type=float, default=0.2, help="PPO clip range.")
     parser.add_argument("--max_grad_norm", type=float, default=0.5, help="PPO grad clipping.")
@@ -405,7 +407,8 @@ def main():
             max_grad_norm=args.max_grad_norm,
             max_time_steps=model.T,
             inference_interval=args.inference_interval,
-            batch_size=args.ppo_batch_size,
+            ppo_epochs=args.ppo_epochs,
+            n_segments=args.n_segments,
             lr=args.ppo_lr,
             reward_fn_dict=reward_fn_dict,
             kl_coeff_pretrain=args.kl_coeff_pretrain,
@@ -423,7 +426,7 @@ def main():
 
         ligSize = "Ref" if args.mode_num_nodes_lig == 'align_reference_ligand' else "Sample"
         # group_name = f"nIter{args.rollouts}_nSample{args.n_samples}_ligSize{ligSize}_allFrags{int(args.all_frags)}_ii{args.inference_interval}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}"
-        group_name = f"ii{args.inference_interval}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}_rewardNorm{ppo_config.reward_norm_mode}"
+        group_name = f"ii{args.inference_interval}_PPO{ppo_config.ppo_epochs}_SEG{ppo_config.n_segments}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}_rNorm{ppo_config.reward_norm_mode}"
         group_name += args.group_name_suffix
         assert len(group_name) <= 128, "WandB group name exceeds 128 characters."
 
@@ -445,7 +448,7 @@ def main():
             project="DiffSBDD-PPO",
             mode=args.wandb_mode,
             group=group_name,
-            name=f"{Path(pdb_file).stem[:4]}-{args.slurm_job_tag}",
+            name=f"{Path(pdb_file).stem[:4]}-{args.slurm_job_tag}-{pocket_idx + 1:03d}",
             config=vars(ppo_config),
         )
         wandb_logger = LoggerWandb()
@@ -453,6 +456,8 @@ def main():
 
         try:
             all_records = []
+            # One optimizer per pocket (model is reloaded per pocket), shared across rollouts
+            optimizer = model.configure_optimizers_rl(ppo_config)
             for rollout_idx in range(args.rollouts):
                 print(f"  Rollout {rollout_idx + 1}/{args.rollouts}...")
                 episodic_metrics, sample_records = model.generate_ligands_rl(
@@ -461,11 +466,13 @@ def main():
                     pocket_ids=pocket_ids,
                     ref_ligand=None if pocket_ids is not None else str(ref_ligand),
                     num_nodes_lig=num_nodes_lig,
+                    n_nodes_min=1,
                     sanitize=args.sanitize,
                     largest_frag=not args.all_frags,
                     relax_iter=(200 if args.relax else 0),
                     timesteps=args.timesteps,
                     ppo_config=ppo_config,
+                    optimizer=optimizer,
                     return_samples=True,
                 )
                 all_records.extend(sample_records)
@@ -473,7 +480,7 @@ def main():
                 if wandb_logger is not None:
                     wandb_logger.log_and_dump(episodic_metrics)
                 # Eval
-                if rollout_idx == args.rollouts - 1:
+                if rollout_idx == args.rollouts - 1 and not args.skip_eval:
                     ppo_config_eval = copy.deepcopy(ppo_config)
                     ppo_config_eval.inference_interval = 1
                     all_records_eval = []
@@ -488,7 +495,7 @@ def main():
                                 pocket_ids=pocket_ids,
                                 ref_ligand=None if pocket_ids is not None else str(ref_ligand),
                                 num_nodes_lig=num_nodes_lig,
-                                # n_nodes_min=1,
+                                n_nodes_min=1,
                                 sanitize=args.sanitize,
                                 largest_frag=not args.all_frags,
                                 relax_iter=(200 if args.relax else 0),

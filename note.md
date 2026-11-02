@@ -176,3 +176,25 @@ $$
 so sampling and likelihoods are consistent under global rotations of the
 ligand–pocket system. Practically, this preserves SE(3) coherence of the model
 and avoids orientation-dependent biases introduced by the initialization.
+
+## 2026-11-02 • Zero-atom ligands and `n_nodes_min` in RL rollouts
+
+Context:
+- `generate_ligands_rl(..., n_nodes_min=0)` (`lightning_modules.py`) clamps the sampled ligand sizes with `torch.clamp(num_nodes_lig, min=n_nodes_min)`. The default is 0, and `batch_generate_ligands_rl.py` never passes `n_nodes_min` (it is commented out in the eval call). So `n_nodes_min` was not set to 1 (fixed, see below).
+- With `--mode_num_nodes_lig sample`, sizes come from `DistributionNodes.n1_given_n2`. The histogram gets `+1e-3` smoothing in every cell, so `P(n_lig=0 | n_pocket) > 0`.
+
+How often (computed from `checkpoints/crossdocked_fullatom_cond.ckpt`):
+- `P(n_lig=0 | n_pocket)`: median 1.0e-4, max 9.3e-4 over pocket sizes seen in training; up to 9.4e-3 for rare pocket sizes.
+- One pocket run draws `n_samples × rollouts` = 32 × 100 = 3200 sizes, so about 0.3 to 3 empty ligands per pocket. Across the full test set this will happen.
+
+What an empty ligand does:
+- Middle slot (e.g. `[7, 0, 9, 5]`, `ligand_mask = [0]*7 + [2]*9 + [3]*5`): the rollout runs, but `sample_p_zs_given_zt_rl` averages `log_prob` over atoms with no `clamp` on `n_atoms` (by choice), so that sample gets `log_prob = 0/0 = NaN` at every step. The NaN propagates into the PPO loss (and `kl_ref`), the grad norm becomes non-finite, and every update of that rollout is skipped (visible as `skipped_updates` in the metrics). `n_nodes_min=1` is what keeps this from happening. The sample still enters reward z-scoring; it is expected to count as invalid, but the reward path for a 0-atom molecule (`build_molecule`, connectivity check) has not been tested.
+  - History (HEAD `cf68f19`): the same NaN appeared there. The old `isnan` filters dropped it from new/old `log_prob` but not from `advantages`, so the shapes no longer matched (e.g. 31 vs 32) and the PPO loss would fail with a broadcast error.
+- Last slot (e.g. `[7, 0, 9, 0]`): **crashes during initialization**, in `sample_normal_zero_com` → `remove_mean_batch`, with `IndexError: index 3 is out of bounds`. `scatter_mean` without `dim_size` returns only `max(ligand_mask)+1` rows. Reproduced on CPU. Roughly 1/n_samples of the zero-size draws land in the last slot.
+
+Implications / recommendation:
+- **Done (2026-11-02):** `batch_generate_ligands_rl.py` now passes `n_nodes_min=1` to both `generate_ligands_rl` calls (training rollouts and eval). This removes both cases at the source; a 0-atom "molecule" is never a useful sample. Other entry points (`test.py --n_nodes_min`, default 0) are unchanged.
+- Alternatively, add `dim_size=n_samples` to every per-sample `scatter_*` in `conditional_model.py` (`remove_mean_batch`, `sample_normal_zero_com`, ...; only `sample_p_zs_given_zt_rl` has it so far), and restore `.clamp(min=1)` on both per-sample atom counts used as divisors: `n_atoms` in `ConditionalDDPM.sample_p_zs_given_zt_rl` (`equivariant_diffusion/conditional_model.py`, divides `log_prob` and entropy) and `n_atoms = torch.bincount(lig_mask, minlength=n_samples)` in the PPO update of `LigandPocketDDPM.generate_ligands_rl` (`lightning_modules.py`, divides `kl_ref`). That is more invasive.
+
+Quick verification:
+- Run `ddpm.rl_given_pocket(pocket, torch.tensor([7, 0, 9, 0]), ppo_config=...)` and expect the IndexError above; with `[7, 0, 9, 5]` it runs, and `log_prob_steps[:, 1]` is NaN (verified on CPU).
