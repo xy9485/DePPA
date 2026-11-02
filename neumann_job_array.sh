@@ -8,7 +8,7 @@
 #SBATCH --output=./slurm_files/slurm-%x-%A_%a.out
 #SBATCH --error=./slurm_files/slurm-%x-%A_%a.err
 #SBATCH --mem=40G
-#SBATCH --array=0-4
+#SBATCH --array=0-3
 ##SBATCH --chdir=/user/yuan.xue/u17632/DiffSBDD_RL
 #SBATCH --chdir=/projects/extern/kisski/kisski-l3s-rl4diff/dir.project/DiffSBDD_RL
 #SBATCH --constraint=inet
@@ -71,8 +71,10 @@ fi
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --output_dir test3 --n_samples 32 --rollouts 3 --top_k 10 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range 
 
-srun -u python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 64 --rollouts 100 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --reward_norm_mode rank --slurm_job_tag ${job_tag} --group_name_suffix _kis_n64_15
+# srun -u python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 64 --rollouts 100 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --reward_norm_mode rank --slurm_job_tag ${job_tag} --group_name_suffix _kis_n64_15
 
 # srun -u python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --mode_num_nodes_lig align_reference_ligand --inference_interval 5 --kl_coeff_pretrain 0.05 --wandb_mode online --limit $pocket_range --w_qed 0.27 --w_sa 0.13 --w_vina_score 0.3 --w_distance 0.3 --w_strain 0.0 --all_frags --slurm_job_tag ${job_tag} --group_name_suffix _kl.05_nodes+-1#1
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 6 --top_k 20 --inference_interval 10 --kl_coeff_pretrain 0.0 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range --group_name_suffix _test
+
+srun -u python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --ppo_epochs 1 --n_segments 1 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --reward_norm_mode rank --slurm_job_tag ${job_tag} --group_name_suffix _kis_n64

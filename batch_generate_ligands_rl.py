@@ -475,6 +475,7 @@ def main():
                     optimizer=optimizer,
                     return_samples=True,
                 )
+                print("Episodic metrics:", episodic_metrics)
                 all_records.extend(sample_records)
                 episodic_metrics["General/rollout_idx"] = rollout_idx
                 if wandb_logger is not None:

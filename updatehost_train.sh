@@ -50,7 +50,7 @@ conda activate sbdd
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --top_k 20 --inference_interval 10 --kl_coeff_pretrain 0.0 --mode_num_nodes_lig sample --wandb_mode online --limit 30-32  --group_name_suffix _test
 
-python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 30 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit 30-32 --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --group_name_suffix _rep1_test_can_delete
+# python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 30 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit 30-32 --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --group_name_suffix _rep1_test_can_delete
 
 # summarize pocket scores
 # python3 summarize_pocket_scores.py rl_batch_testset/ligSizeRef_ii10_NormRank_Penalty-3std_QED0.3_SA0.3_Vina0.4_Distance0.0_KL0.0
@@ -62,3 +62,5 @@ python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckp
 # python post_metrics.py --sdf_path /home/xue/repos/DiffSBDD/rl_batch_testset/nIter20_nSample32_ligSizeSample_allFrags0_ii10_QED0.27_SA0.13_Vina0.3_Dist0.3_KL0.0_testing/3pnm-A-rec-3pnq-2ha-lig-tt-docked-10-pocket10 --pocket_pdb_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --overwrite
 
 # python post_metrics.py --results_dir /home/xue/repos/DiffSBDD/rl_batch_testset/RLTestset_nRollout100_nSample32_ligSizeSample_allFrags0_ii10_NormRank_Penalty-3std_QED0.27_SA0.13_Vina0.3_Distance0.3_KL0.0 --csv_name top_100_scores.csv --skip_vina
+
+python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 8 --rollouts 100 --ppo_epochs 1 --n_segments 1 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode offline --limit 30-32 --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --reward_norm_mode rank --group_name_suffix _kis_n64_debug

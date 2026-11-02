@@ -1407,7 +1407,7 @@ class LigandPocketDDPM(pl.LightningModule):
         print(f"strain energy: {properties_dict['strain']}")
         print(f"clash score: {properties_dict['clash']}")
         print("pdb_file:", pdb_file)
-        print("Episodic metrics:", episodic_metrics)
+        # print("Episodic metrics:", episodic_metrics)
         print(f"Rollout combined rewards mean: {rewards.mean().item()}, std: {rewards.std().item()}")
 
         if policy_update:
