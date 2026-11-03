@@ -426,7 +426,7 @@ def main():
 
         ligSize = "Ref" if args.mode_num_nodes_lig == 'align_reference_ligand' else "Sample"
         # group_name = f"nIter{args.rollouts}_nSample{args.n_samples}_ligSize{ligSize}_allFrags{int(args.all_frags)}_ii{args.inference_interval}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}"
-        group_name = f"ii{args.inference_interval}_PPO{ppo_config.ppo_epochs}_SEG{ppo_config.n_segments}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}_rNorm{ppo_config.reward_norm_mode}"
+        group_name = f"ii{args.inference_interval}_QED{ppo_config.reward_weights['qed']}_SA{ppo_config.reward_weights['sa']}_Vina{ppo_config.reward_weights['vina_score']}_Dist{ppo_config.reward_weights['distance']}_KL{args.kl_coeff_pretrain}_strain{ppo_config.reward_weights.get('strain', 0.0)}_PPO{ppo_config.ppo_epochs}_SEG{ppo_config.n_segments}_rNorm{ppo_config.reward_norm_mode}_n{args.n_samples}"
         group_name += args.group_name_suffix
         assert len(group_name) <= 128, "WandB group name exceeds 128 characters."
 
