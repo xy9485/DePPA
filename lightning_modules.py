@@ -1450,52 +1450,53 @@ class LigandPocketDDPM(pl.LightningModule):
                     optimizer.zero_grad(set_to_none=True)
 
                     for i in indices:
-                        # Recompute log_prob under current policy for PPO ratio.
-                        # Kept in fp32 like the rollout, so the ratio is exactly 1
-                        # before the first update (bf16 autocast broke this).
-                        out_dict = self.ddpm.sample_p_zs_given_zt_rl(
-                            s_norm_all[i], t_norm_all[i],
-                            zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
-                            ligand_mask=lig_mask, pocket_mask=pocket['mask'],
-                            action=rollout_buffer.action_steps[i], mu_via_x0=True
-                        )
-                        new_log_prob = out_dict['log_prob']        # (n_samples,)
-                        old_log_prob = rollout_buffer.log_prob_steps[i]
+                        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                            # Recompute log_prob under current policy for PPO ratio.
+                            # Kept in fp32 like the rollout, so the ratio is exactly 1
+                            # before the first update (bf16 autocast broke this).
+                            out_dict = self.ddpm.sample_p_zs_given_zt_rl(
+                                s_norm_all[i], t_norm_all[i],
+                                zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                                ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                                action=rollout_buffer.action_steps[i], mu_via_x0=True
+                            )
+                            new_log_prob = out_dict['log_prob']        # (n_samples,)
+                            old_log_prob = rollout_buffer.log_prob_steps[i]
 
-                        logratio = new_log_prob - old_log_prob
-                        ratio = torch.exp(logratio)
+                            logratio = new_log_prob - old_log_prob
+                            ratio = torch.exp(logratio)
 
-                        unclipped = -advantages * ratio
-                        clipped = -advantages * torch.clamp(
-                            ratio,
-                            1.0 - ppo_config.clip_range,
-                            1.0 + ppo_config.clip_range,
-                        )
-                        loss_i = torch.mean(torch.maximum(unclipped, clipped))
-                        total_loss = loss_i
-                        # Diagnostics similar to ddpo
-                        approx_kl_vals.append(0.5 * torch.mean(logratio ** 2).detach())
-                        clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach())
-                        loss_vals.append(loss_i.detach())
-                        # --- KL to pretrained policy ---
-                        if use_kl_ref:
-                            with torch.no_grad():
-                                mu_ref = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
-                                    s_norm_all[i], t_norm_all[i],
-                                    zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
-                                    ligand_mask=lig_mask, pocket_mask=pocket['mask'],
-                                    action=rollout_buffer.action_steps[i], mu_via_x0=True
-                                )['mu']
-                            # Analytic KL(pi_theta || pi_ref) per step: both are Gaussians
-                            # sharing sigma (fixed noise schedule), so
-                            # KL = ||mu_theta - mu_ref||^2 / (2 sigma^2),
-                            # averaged over atoms to match log_prob.
-                            kl_node = ((out_dict['mu'] - mu_ref) ** 2
-                                       / (2 * out_dict['sigma'] ** 2)).sum(dim=1)
-                            kl_ref = scatter_add(kl_node, lig_mask, dim=0, dim_size=n_samples) / n_atoms
-                            kl_loss = kl_ref.mean()
-                            kl_ref_vals.append(kl_loss.detach())
-                            total_loss = total_loss + ppo_config.kl_coeff_pretrain * kl_loss
+                            unclipped = -advantages * ratio
+                            clipped = -advantages * torch.clamp(
+                                ratio,
+                                1.0 - ppo_config.clip_range,
+                                1.0 + ppo_config.clip_range,
+                            )
+                            loss_i = torch.mean(torch.maximum(unclipped, clipped))
+                            total_loss = loss_i
+                            # Diagnostics similar to ddpo
+                            approx_kl_vals.append(0.5 * torch.mean(logratio ** 2).detach())
+                            clipfrac_vals.append(torch.mean((torch.abs(ratio - 1.0) > ppo_config.clip_range).float()).detach())
+                            loss_vals.append(loss_i.detach())
+                            # --- KL to pretrained policy ---
+                            if use_kl_ref:
+                                with torch.no_grad():
+                                    mu_ref = self.ddpm_pretrained.sample_p_zs_given_zt_rl(
+                                        s_norm_all[i], t_norm_all[i],
+                                        zt_lig=rollout_buffer.obs_steps[i], xh0_pocket=rollout_buffer.xh_pocket_steps[i],
+                                        ligand_mask=lig_mask, pocket_mask=pocket['mask'],
+                                        action=rollout_buffer.action_steps[i], mu_via_x0=True
+                                    )['mu']
+                                # Analytic KL(pi_theta || pi_ref) per step: both are Gaussians
+                                # sharing sigma (fixed noise schedule), so
+                                # KL = ||mu_theta - mu_ref||^2 / (2 sigma^2),
+                                # averaged over atoms to match log_prob.
+                                kl_node = ((out_dict['mu'] - mu_ref) ** 2
+                                        / (2 * out_dict['sigma'] ** 2)).sum(dim=1)
+                                kl_ref = scatter_add(kl_node, lig_mask, dim=0, dim_size=n_samples) / n_atoms
+                                kl_loss = kl_ref.mean()
+                                kl_ref_vals.append(kl_loss.detach())
+                                total_loss = total_loss + ppo_config.kl_coeff_pretrain * kl_loss
                         # -------------------------------
                         # Accumulate gradients over the segment (averaged over its time steps)
                         (total_loss / len(indices)).backward()
