@@ -1,34 +1,38 @@
 #!/bin/bash
 
 # See `man sbatch` or https://slurm.schedmd.com/sbatch.html for descriptions of sbatch options.
-#SBATCH --job-name=diffsbdd
-#SBATCH -t 32:00:00
-#SBATCH -p kisski               # kisski or kisski-h100
-#SBATCH --gres=gpu:A100:1            # gpu:A100:1 or gpu:H100:1
+#SBATCH --job-name=deppa-opt         # A nice readable name of your job, to see it in the queue
+
+#SBATCH --account=siswiss
+#SBATCH --nodelist=gpunode08
+
+#SBATCH --partition=blackwell             # Partition to submit the job to, ampere, hopper
+
+#SBATCH --time=0-24         # Time limit hrs:min:sec
+#SBATCH --nodes=1                   # Number of nodes to request
+#SBATCH --cpus-per-task=32           # Number of CPUs to request
+#SBATCH --gpus=1                    # Number of GPUs to request
+
+#SBATCH --mem=48G
 #SBATCH --output=./slurm_files/slurm-%x-%A_%a.out
 #SBATCH --error=./slurm_files/slurm-%x-%A_%a.err
-#SBATCH --mem=40G
 #SBATCH --array=0-3
-##SBATCH --chdir=/user/yuan.xue/u17632/DiffSBDD_RL
-#SBATCH --chdir=/projects/extern/kisski/kisski-l3s-rl4diff/dir.project/DiffSBDD_RL
-#SBATCH --constraint=inet
 
 # set -euo pipefail
 
 # Use a job-specific temp dir so module/conda init does not fail when /tmp is full on a node.
 # export TMPDIR="${HOME}/tmp/${SLURM_JOB_ID:-$$}"
-# export TMPDIR="${HOME}/tmp"
-# mkdir -p "$TMPDIR"
+export TMPDIR="${HOME}/tmp"
+mkdir -p "$TMPDIR"
 # trap 'rm -rf "$TMPDIR"' EXIT
 
-source ~/.bashrc
-# module load mamba
-module load miniforge3
+module load mamba
+module load conda
 # Activate your environment, you have to create it first
 # mamba activate sbdd
 
 # conda activate diffsbdd
-conda activate sbdd
+conda activate deppa
 
 # export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -77,4 +81,4 @@ fi
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 6 --top_k 20 --inference_interval 10 --kl_coeff_pretrain 0.0 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range --group_name_suffix _test
 
-srun -u python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --ppo_epochs 1 --n_segments 1 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --reward_norm_mode rank --slurm_job_tag ${job_tag} --group_name_suffix _kis_n64
+srun -u python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --ppo_epochs 2 --n_segments 10 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --reward_norm_mode rank --slurm_job_tag ${job_tag} --group_name_suffix _#1
