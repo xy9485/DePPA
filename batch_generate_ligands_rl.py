@@ -64,6 +64,7 @@ def parse_args():
     parser.add_argument("--inference_interval", type=int, default=10, help="Steps between PPO observations.")
     parser.add_argument("--clip_range", type=float, default=0.2, help="PPO clip range.")
     parser.add_argument("--max_grad_norm", type=float, default=0.5, help="PPO grad clipping.")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay for PPO optimizer")
     parser.add_argument("--kl_coeff_pretrain", type=float, default=0.0, help="KL penalty to the pretrained policy.")
     parser.add_argument(
         "--reward_norm_mode",
@@ -410,6 +411,7 @@ def main():
             ppo_epochs=args.ppo_epochs,
             n_segments=args.n_segments,
             lr=args.ppo_lr,
+            weight_decay=args.weight_decay,
             reward_fn_dict=reward_fn_dict,
             kl_coeff_pretrain=args.kl_coeff_pretrain,
             reward_num_workers=args.reward_workers,

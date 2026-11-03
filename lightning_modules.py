@@ -880,7 +880,7 @@ class LigandPocketDDPM(pl.LightningModule):
 
     def configure_optimizers_rl(self, ppo_config):
         return torch.optim.AdamW(self.ddpm.parameters(), lr=ppo_config.lr,
-                                 amsgrad=True, weight_decay=0.0)  # regularize via KL to pretrained, not decay to 0
+                                 amsgrad=True, weight_decay=ppo_config.weight_decay)
 
     def generate_ligands_rl(self, pdb_file, n_samples, pocket_ids=None,
                          ref_ligand=None, num_nodes_lig=None, sanitize=False,
