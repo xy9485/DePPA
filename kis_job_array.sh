@@ -2,7 +2,7 @@
 
 # See `man sbatch` or https://slurm.schedmd.com/sbatch.html for descriptions of sbatch options.
 #SBATCH --job-name=diffsbdd
-#SBATCH -t 32:00:00
+#SBATCH -t 10:00:00
 #SBATCH -p kisski               # kisski or kisski-h100
 #SBATCH --gres=gpu:A100:1            # gpu:A100:1 or gpu:H100:1
 #SBATCH --output=./slurm_files/slurm-%x-%A_%a.out
@@ -77,4 +77,4 @@ fi
 
 # python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir /home/xue/repos/DiffSBDD/datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 6 --top_k 20 --inference_interval 10 --kl_coeff_pretrain 0.0 --mode_num_nodes_lig sample --wandb_mode online --limit $pocket_range --group_name_suffix _test
 
-srun -u python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --ppo_epochs 1 --n_segments 1 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --reward_norm_mode rank --slurm_job_tag ${job_tag} --group_name_suffix _kis_n64
+srun -u python -u batch_generate_ligands_rl.py checkpoints/crossdocked_fullatom_cond.ckpt --dataset_dir datasets2/processed_crossdock_noH_full_temp/test --sanitize --n_samples 32 --rollouts 100 --ppo_epochs 1 --n_segments 50 --amp_dtype bf16 --mode_num_nodes_lig sample --inference_interval 5 --kl_coeff_pretrain 0.0 --wandb_mode online --limit $pocket_range --w_qed 0.2 --w_sa 0.2 --w_vina_score 0.5 --w_distance 0.1 --w_strain 0.0 --reward_norm_mode rank --slurm_job_tag ${job_tag} --group_name_suffix _#1
