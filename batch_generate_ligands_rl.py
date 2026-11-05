@@ -65,6 +65,8 @@ def parse_args():
     parser.add_argument("--clip_range", type=float, default=0.2, help="PPO clip range.")
     parser.add_argument("--max_grad_norm", type=float, default=0.5, help="PPO grad clipping.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="weight decay for PPO optimizer")
+    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "adam", "sgd"],
+                        help="Optimizer for PPO updates (adam/adamw use amsgrad).")
     parser.add_argument("--kl_coeff_pretrain", type=float, default=0.0, help="KL penalty to the pretrained policy.")
     parser.add_argument(
         "--reward_norm_mode",
@@ -412,6 +414,7 @@ def main():
             n_segments=args.n_segments,
             lr=args.ppo_lr,
             weight_decay=args.weight_decay,
+            optimizer=args.optimizer,
             reward_fn_dict=reward_fn_dict,
             kl_coeff_pretrain=args.kl_coeff_pretrain,
             reward_num_workers=args.reward_workers,

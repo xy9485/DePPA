@@ -879,8 +879,19 @@ class LigandPocketDDPM(pl.LightningModule):
         return molecules
 
     def configure_optimizers_rl(self, ppo_config):
-        return torch.optim.AdamW(self.ddpm.parameters(), lr=ppo_config.lr,
-                                 amsgrad=True, weight_decay=ppo_config.weight_decay)
+        name = getattr(ppo_config, 'optimizer', 'adamw').lower()
+        weight_decay = getattr(ppo_config, 'weight_decay', 0.0)
+        params = self.ddpm.parameters()
+        if name == 'adamw':
+            return torch.optim.AdamW(params, lr=ppo_config.lr,
+                                     amsgrad=True, weight_decay=weight_decay)
+        if name == 'adam':
+            return torch.optim.Adam(params, lr=ppo_config.lr,
+                                    amsgrad=True, weight_decay=weight_decay)
+        if name == 'sgd':
+            return torch.optim.SGD(params, lr=ppo_config.lr,
+                                   weight_decay=weight_decay)
+        raise ValueError(f"Unknown optimizer '{name}'. Choose from: adamw, adam, sgd.")
 
     def generate_ligands_rl(self, pdb_file, n_samples, pocket_ids=None,
                          ref_ligand=None, num_nodes_lig=None, sanitize=False,
