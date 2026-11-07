@@ -78,12 +78,17 @@ class BasicMolecularMetrics(object):
         least x% of all atoms, where x is determined by
         self.connectivity_thresh (defaults to 100%). """
         if len(valid) < 1:
-            return [], 0.0
+            return [], 0.0, []
 
         connected = []
         connected_smiles = []
         for mol in valid:
-            mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True)
+            try:
+                mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True)
+            except ValueError:
+                # fragment re-sanitization (e.g. kekulization) can fail even
+                # if the full molecule sanitized; treat as not connected
+                continue
             largest_mol = \
                 max(mol_frags, default=mol, key=lambda m: m.GetNumAtoms())
             if largest_mol.GetNumAtoms() / mol.GetNumAtoms() >= self.connectivity_thresh:
